@@ -34,7 +34,7 @@ HTML_PATH = sys.argv[3] if len(sys.argv) > 3 else os.path.join(os.path.dirname(_
 
 META = {
     "date": "2026-06-17",
-    "exam_days": 9,
+    "exam_days": 8,
     "exam_total_days": 24
 }
 
