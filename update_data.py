@@ -773,6 +773,88 @@ if idx_d_start >= 0:
 else:
     print("  ✗ D variable not found!")
 
+# ============================================================
+# 10.5 Build and replace SEARCH_DATA
+# ============================================================
+print("Building SEARCH_DATA...")
+
+# Build lookup: spu_id -> extra fields from current Excel (商品诊断明细)
+extra_fields_map = {}  # spu_id_str -> dict
+for _, row in df_goods.iterrows():
+    spu_id = safe_str(row.get('SPU-ID'))
+    if not spu_id:
+        continue
+    extra_fields_map[spu_id] = {
+        'liang_chu': safe_bool(row.get('商家亮厨是否达标')),
+        'ad': safe_bool(row.get('是否买广告')),
+        'pin_dan_bao': safe_bool(row.get('是否开通拼单宝')),
+        'zi_qu': safe_bool(row.get('是否开通到店自取')),
+        'score': r2(safe_float(row.get('商品分'))),
+        'bd_name': safe_str(row.get('BD姓名')),
+        'merchant_name': safe_str(row.get('商家名称')),
+        'hive_name': safe_str(row.get('蜂窝名称')),
+        'group': safe_str(row.get('联络点')),
+        'cat': safe_str(row.get('宽前端三级品类')),
+    }
+
+# Build SEARCH_DATA: all SPU rows from 商品诊断明细
+SEARCH_DATA = []
+for _, row in df_goods.iterrows():
+    spu_id = safe_str(row.get('SPU-ID'))
+    if not spu_id:
+        continue
+
+    hive_name = safe_str(row.get('蜂窝名称'))
+    group = safe_str(row.get('联络点'))
+    cat = safe_str(row.get('宽前端三级品类'))
+
+    current_orders = safe_float(row.get('拼好饭订单'))
+    base_orders = base_orders_map.get(spu_id, 0.0)
+    exam_orders = current_orders - base_orders
+    daily = r2(max(exam_orders / META['exam_days'], 0.0) if META['exam_days'] > 0 else 0.0)
+
+    threshold = r2(safe_float(row.get('标杆单产阈值')))
+    is_bm = 1 if (daily >= threshold and threshold > 0) else 0
+    diff = r2(daily - threshold) if threshold > 0 else 0.0
+
+    entry = {
+        'spu_id': spu_id,
+        'spu_name': safe_str(row.get('SPU名称', '')),
+        'hive_name': hive_name,
+        'cat': cat,
+        'group': group,
+        'bd_name': safe_str(row.get('BD姓名')),
+        'merchant_name': safe_str(row.get('商家名称')),
+        'daily': daily,
+        'threshold': threshold,
+        'is_bm': is_bm,
+        'diff': diff,
+        'liang_chu': safe_bool(row.get('商家亮厨是否达标')),
+        'ad': safe_bool(row.get('是否买广告')),
+        'pin_dan_bao': safe_bool(row.get('是否开通拼单宝')),
+        'zi_qu': safe_bool(row.get('是否开通到店自取')),
+        'score': r2(safe_float(row.get('商品分'))),
+    }
+    SEARCH_DATA.append(entry)
+
+print(f"  SEARCH_DATA 条数: {len(SEARCH_DATA)}")
+
+search_js = f"const SEARCH_DATA = {json.dumps(SEARCH_DATA, ensure_ascii=False)};"
+
+# Replace SEARCH_DATA placeholder in HTML
+pattern_search = re.compile(r'const SEARCH_DATA\s*=\s*\[.*?\];', re.DOTALL)
+if pattern_search.search(html):
+    html = pattern_search.sub(search_js, html, count=1)
+    print("  ✓ SEARCH_DATA replaced")
+else:
+    # Insert before </script> of the data block (after TOP10_DATA)
+    insert_marker = '// END_DATA_BLOCK'
+    if insert_marker in html:
+        html = html.replace(insert_marker, search_js + '\n' + insert_marker)
+        print("  ✓ SEARCH_DATA inserted at END_DATA_BLOCK")
+    else:
+        print("  ✗ SEARCH_DATA placeholder not found, skipping")
+
 # 11. Write output
 with open(HTML_PATH, 'w', encoding='utf-8') as f:
     f.write(html)
@@ -780,4 +862,5 @@ print(f"\n✅ Done! Updated {HTML_PATH}")
 print(f"   File size: {len(html.encode('utf-8')):,} bytes")
 print(f"   蜂窝数: {len(D_with_meta.get('hives', {}))}")
 print(f"   TOP10品类: {len(TOP10_DATA)}")
+print(f"   SEARCH_DATA 条数: {len(SEARCH_DATA)}")
 print(f"   日期: {META['date']}, 考核天数: {META['exam_days']}")
