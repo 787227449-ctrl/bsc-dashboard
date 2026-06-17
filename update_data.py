@@ -498,7 +498,29 @@ def calc_score(hive_data):
 
 today_scores = {}
 for hive_name, hive_data in D.items():
+    cats = hive_data.get('cat_status', {})
+    cat_count = len(cats)
+    quality_only = 0
+    dabiao_only = 0
+    houdu_count = 0
+    for c in cats.values():
+        is_houdu  = bool(c.get('is_houdu') or c.get('has_houdu'))
+        is_dabiao = bool(c.get('is_dabiao'))
+        is_quality= bool(c.get('is_quality'))
+        if is_houdu:
+            houdu_count += 1
+        elif is_dabiao:
+            dabiao_only += 1
+        elif is_quality:
+            quality_only += 1
     fs, dr, coeff, dab = calc_score(hive_data)
+    # Write score fields back into the hive object so the JS can read them
+    hive_data['finalScore']  = fs
+    hive_data['dabiaoRate']  = dr
+    hive_data['qualityOnly'] = quality_only
+    hive_data['dabiaoOnly']  = dabiao_only
+    hive_data['houduCnt']    = houdu_count
+    hive_data['totalCore']   = cat_count
     today_scores[hive_data['id']] = {
         'name': hive_name,
         'bd': hive_data['bd'],
@@ -508,6 +530,10 @@ for hive_name, hive_data in D.items():
         'pinxiaoCoeff': coeff,
         'dabiao': dab,
         'catCount': hive_data['cat_count'],
+        'qualityOnly': quality_only,
+        'dabiaoOnly':  dabiao_only,
+        'houduCnt':    houdu_count,
+        'totalCore':   cat_count,
     }
 
 yesterday_scores = {}
