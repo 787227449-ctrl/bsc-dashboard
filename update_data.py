@@ -665,37 +665,48 @@ else:
         print("  ✗ TOP10_DATA not found!")
 
 # 10.4 Replace D
+# Use brace-counting to find exact end of D object
 d_js = f"const D={json.dumps(D_with_meta, ensure_ascii=False)};\n"
 idx_d_start = html.find('const D={')
 if idx_d_start < 0:
     idx_d_start = html.find('const D =')
 if idx_d_start >= 0:
-    rest = html[idx_d_start:]
-    # Find 'const meta=D.meta' which comes after D definition
-    meta_marker = rest.find('const meta=D.meta')
-    if meta_marker < 0:
-        meta_marker = rest.find('let dateStr')
-    if meta_marker < 0:
-        meta_marker = rest.find('const DATA_CUTOFF')
-    if meta_marker >= 0:
-        chunk = rest[:meta_marker]
-        last_semi = chunk.rfind(';\n')
-        if last_semi >= 0:
-            d_end = idx_d_start + last_semi + 2
-            html = html[:idx_d_start] + d_js + html[d_end:]
-            print("  ✓ D replaced")
-        else:
-            last_semi = chunk.rfind('};')
-            if last_semi >= 0:
-                d_end = idx_d_start + last_semi + 2
-                html = html[:idx_d_start] + d_js + html[d_end:]
-                print("  ✓ D replaced (alt)")
-            else:
-                print("  ✗ Could not find D end!")
+    brace_start = html.find('{', idx_d_start)
+    depth = 0
+    in_string = False
+    escape_next = False
+    d_end = -1
+    for i in range(brace_start, len(html)):
+        ch = html[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\':
+            if in_string:
+                escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                d_end = i + 1  # include the '}'
+                break
+    if d_end > 0:
+        # Include the ';' after '}'
+        if html[d_end] == ';':
+            d_end += 1
+        html = html[:idx_d_start] + d_js + html[d_end:]
+        print("  \u2713 D replaced")
     else:
-        print("  ✗ Could not find marker after D!")
+        print("  \u2717 Could not find D closing brace!")
 else:
-    print("  ✗ D variable not found!")
+    print("  \u2717 D variable not found!")
 
 # 11. Write output
 with open(HTML_PATH, 'w', encoding='utf-8') as f:
