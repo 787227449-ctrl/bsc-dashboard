@@ -914,11 +914,16 @@ print(f"  TOP10品类数: {len(TOP10_DATA)}")
 # ============================================================
 print("Building HISTORY entry...")
 
+# Compute overall_bm_rate (average dabiaoRate across all hives) for sparkline
+all_dabiao_rates = [ts['dabiaoRate'] for ts in today_scores.values()]
+overall_bm_rate = round(sum(all_dabiao_rates) / max(len(all_dabiao_rates), 1), 4)
+
 history_entry = {
     'date': META['date'],
     'exam_days': META['exam_days'],
     'hives': today_scores,
     'overall': {'dod': overall_dod, 'mom': overall_mom},
+    'overall_bm_rate': overall_bm_rate,
 }
 
 # ============================================================
