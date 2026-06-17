@@ -218,18 +218,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hira
 
 <!-- BOARD -->
 <div id="page-board" class="page">
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
-    <span style="font-size:14px;font-weight:700;color:var(--primary);white-space:nowrap">浦西团队</span>
-    <select id="bf-grp" onchange="renderBoardFiltered()" style="padding:5px 10px;border:1px solid #ddd;border-radius:6px;font-size:13px;background:#fff;outline:none;color:#333">
-      <option value="">全部小组</option>
-      <option value="浦西一组联络点">浦西一组</option>
-      <option value="浦西二组联络点">浦西二组</option>
-      <option value="浦西三组联络点">浦西三组</option>
-      <option value="浦西四组联络点">浦西四组</option>
-    </select>
-    <select id="bf-bd" onchange="renderBoardFiltered()" style="padding:5px 10px;border:1px solid #ddd;border-radius:6px;font-size:13px;background:#fff;outline:none;color:#333">
-      <option value="">全部BD</option>
-    </select>
+  <!-- 整体趋势卡片 -->
+  <div class="card" style="margin-bottom:12px" id="board-trend-card">
+    <div class="card-body" style="padding:14px 16px">
+      <div style="font-size:13px;font-weight:700;color:#333;margin-bottom:10px">浦西团队 成熟度变化趋势</div>
+      <!-- DOD/WOW/MOM 指标行 -->
+      <div style="display:flex;gap:0;margin-bottom:12px;background:#f8f9fa;border-radius:8px;overflow:hidden" id="board-trend-stats"></div>
+      <!-- 趋势折线图 -->
+      <div style="position:relative;height:80px">
+        <canvas id="boardTrendCanvas" style="width:100%;height:80px"></canvas>
+      </div>
+    </div>
   </div>
   <div id="board-grp"></div>
 </div>
@@ -629,16 +628,64 @@ function drawTrendChart(mode){
 let boardInited=false;
 function initBoardIfNeeded(){
   if(!boardInited){
-    // populate BD dropdown
-    const bdSet=new Set();
-    for(const hs of Object.values(STATS.hiveS)){if(hs.bd)bdSet.add(hs.bd);}
-    const sel=document.getElementById('bf-bd');
-    [...bdSet].sort().forEach(bd=>{
-      const o=document.createElement('option');o.value=bd;o.textContent=bd;sel.appendChild(o);
-    });
     boardInited=true;
+    renderBoardTrendCard();
     renderBoardFiltered();
   }
+}
+
+function renderBoardTrendCard(){
+  // DOD/WOW/MOM
+  const ov=TREND.overall||{};
+  const dod=ov.dod!=null?ov.dod:null;
+  const wow=ov.mom!=null?ov.mom:null;
+  function statBox(label,val){
+    if(val==null)return`<div style="flex:1;padding:10px 0;text-align:center;border-right:1px solid #eee"><div style="font-size:11px;color:#aaa;margin-bottom:3px">${label}</div><div style="font-size:13px;color:#bbb">-</div></div>`;
+    const diff=val-100;
+    const up=diff>0.4;const dn=diff<-0.4;
+    const col=up?'var(--success)':dn?'var(--danger)':'#888';
+    const sign=up?'▲':dn?'▼':'';
+    return`<div style="flex:1;padding:10px 0;text-align:center;border-right:1px solid #eee"><div style="font-size:11px;color:#aaa;margin-bottom:3px">${label}</div><div style="font-size:14px;font-weight:700;color:${col}">${sign}${diff>=0?'+':''}${diff.toFixed(1)}%</div></div>`;
+  }
+  const statsEl=document.getElementById('board-trend-stats');
+  statsEl.innerHTML=[
+    statBox('日 DOD',dod),
+    statBox('周 WOW',wow),
+    `<div style="flex:1;padding:10px 0;text-align:center"><div style="font-size:11px;color:#aaa;margin-bottom:3px">月 MOM</div><div style="font-size:13px;color:#bbb">-</div></div>`
+  ].join('');
+
+  // 趋势折线图（用 HISTORY 数据）
+  const canvas=document.getElementById('boardTrendCanvas');
+  if(!canvas||!HISTORY||HISTORY.length<2)return;
+  const dpr=window.devicePixelRatio||1;
+  const W=canvas.parentElement.offsetWidth||300;
+  const H=80;
+  canvas.width=W*dpr;canvas.height=H*dpr;
+  canvas.style.width=W+'px';canvas.style.height=H+'px';
+  const ctx=canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
+  const vals=HISTORY.map(h=>h.overall_bm_rate||0);
+  const mn=Math.min(...vals),mx=Math.max(...vals)||0.01;
+  const pad={t:8,b:20,l:8,r:8};
+  const cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
+  const pts=vals.map((v,i)=>[pad.l+i/(vals.length-1)*cw, pad.t+ch-(v-mn)/(mx-mn||1)*ch]);
+  // 封闭区域渐变色
+  const grad=ctx.createLinearGradient(0,pad.t,0,pad.t+ch);
+  grad.addColorStop(0,'rgba(21,101,192,0.18)');grad.addColorStop(1,'rgba(21,101,192,0)');
+  ctx.beginPath();ctx.moveTo(pts[0][0],pts[0][1]);
+  pts.slice(1).forEach(p=>ctx.lineTo(p[0],p[1]));
+  ctx.lineTo(pts[pts.length-1][0],pad.t+ch);ctx.lineTo(pts[0][0],pad.t+ch);ctx.closePath();
+  ctx.fillStyle=grad;ctx.fill();
+  // 折线
+  ctx.beginPath();ctx.moveTo(pts[0][0],pts[0][1]);
+  pts.slice(1).forEach(p=>ctx.lineTo(p[0],p[1]));
+  ctx.strokeStyle='#1565C0';ctx.lineWidth=2;ctx.stroke();
+  // X 轴日期标签
+  ctx.fillStyle='#aaa';ctx.font=`${10*dpr/dpr}px sans-serif`;ctx.textAlign='center';
+  HISTORY.forEach((h,i)=>{
+    const x=pts[i][0];
+    ctx.fillText((h.date||'').slice(5),x,H-4);
+  });
 }
 function renderBoardFiltered(){
   const grpF=document.getElementById('bf-grp').value;
