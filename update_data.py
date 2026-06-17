@@ -4,7 +4,7 @@
 默认 html_path = ./june_exam.html
 
 从 Excel 数据更新 Dashboard HTML 中的 JS 变量:
-  - const D={...}
+  - const D={...}   — 保留原始 HTML 中的蜂窝列表、品类列表、SPU ID 列表，只更新数值
   - const TREND = {...}
   - const HISTORY = [...]
   - const TOP10_DATA = {...}
@@ -90,9 +90,68 @@ def r2(v):
     return round(v, 2)
 
 # ============================================================
+# 0.5 Parse original D from HTML (preserve structure)
+# ============================================================
+print("Parsing original D from HTML...")
+
+def extract_d_from_html(html_path):
+    """Extract the D object from the HTML file using brace counting."""
+    with open(html_path, 'r', encoding='utf-8') as f:
+        html = f.read()
+
+    idx = html.find('const D={')
+    if idx < 0:
+        idx = html.find('const D =')
+    if idx < 0:
+        raise ValueError("Cannot find 'const D=' in HTML file")
+
+    brace_start = html.find('{', idx)
+    depth = 0
+    in_string = False
+    escape_next = False
+    d_end = -1
+    for i in range(brace_start, len(html)):
+        ch = html[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\':
+            if in_string:
+                escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                d_end = i + 1
+                break
+
+    if d_end < 0:
+        raise ValueError("Cannot find closing brace for D object")
+
+    d_str = html[brace_start:d_end]
+    return json.loads(d_str)
+
+orig_D = extract_d_from_html(HTML_PATH)
+print(f"  原始蜂窝数: {len(orig_D.get('hives', {}))}")
+for hname, hdata in orig_D.get('hives', {}).items():
+    print(f"    {hname}: {hdata['cat_count']} cats")
+
+# Build lookup: hive_id -> hive_name (from original D)
+orig_hive_id_to_name = {}
+for hname, hdata in orig_D['hives'].items():
+    orig_hive_id_to_name[str(hdata['id'])] = hname
+
+# ============================================================
 # 1. Read Excel
 # ============================================================
-print("Reading Excel...")
+print("\nReading Excel...")
 xls = pd.ExcelFile(EXCEL_PATH)
 
 df_roster = pd.read_excel(xls, '花名册')
@@ -121,44 +180,24 @@ for _, row in df_roster.iterrows():
 print(f"  考核蜂窝数: {len(roster)}")
 
 # ============================================================
-# 3. Build category data from 品类诊断明细
+# 3. Build category-level data from 品类诊断明细 (indexed by hive_id + cat)
 # ============================================================
-print("Building category data...")
-cat_data = {}  # hive_id -> {cat_name -> {...}}
+print("Building category data from Excel...")
+# This builds a lookup: {hive_id -> {cat_name -> {...}}} for ALL cats in Excel
+# We'll use it later to update only the cats that exist in original D
+cat_data_excel = {}  # hive_id -> {cat_name -> {...}}
 for _, row in df_cat.iterrows():
     hid = safe_str(row.get('蜂窝ID'))
-    if hid not in roster:
+    if not hid:
         continue
     cat_name = safe_str(row.get('宽前端三级品类'))
     if not cat_name:
         continue
 
-    # Determine if 必上菜
-    is_must = False
-    if '是否必上菜' in df_cat.columns:
-        val = safe_str(row.get('是否必上菜'))
-        if val and val not in ('0', 'nan', ''):
-            is_must = True
-    if not is_must and '是否核心品类' in df_cat.columns:
-        if safe_int(row.get('是否核心品类')) == 1:
-            is_must = True
-    if not is_must and '做工类型' in df_cat.columns:
-        val = safe_str(row.get('做工类型'))
-        if '必上菜' in val:
-            is_must = True
-    if not is_must and '品类识别' in df_cat.columns:
-        # check if it's in the expected category
-        val = safe_str(row.get('品类识别'))
-        if val and val not in ('0', 'nan', ''):
-            is_must = True
+    if hid not in cat_data_excel:
+        cat_data_excel[hid] = {}
 
-    if not is_must:
-        continue
-
-    if hid not in cat_data:
-        cat_data[hid] = {}
-
-    cat_data[hid][cat_name] = {
+    cat_data_excel[hid][cat_name] = {
         'threshold': safe_float(row.get('标杆阈值')),
         'is_quality': safe_bool(row.get('质量是否达标')),
         'has_bm': safe_bool(row.get('是否有标杆')),
@@ -268,39 +307,76 @@ def build_goods_from_df(df, roster_hids=None):
 
     return goods
 
-goods_today = build_goods_from_df(df_goods, set(roster.keys()))
-goods_yesterday = build_goods_from_df(df_yesterday_goods, set(roster.keys()))
+# Collect all hive IDs that appear in original D
+orig_hive_ids = set(str(h['id']) for h in orig_D['hives'].values())
+goods_today = build_goods_from_df(df_goods, orig_hive_ids)
+goods_yesterday = build_goods_from_df(df_yesterday_goods, orig_hive_ids)
 
 # ============================================================
-# 5. Build D object
+# 5. Build D object — preserving original structure
 # ============================================================
-print("Building D object...")
+print("Building D object (preserving original cats/spu_ids)...")
 
-def build_hive_data(hive_id, roster_entry, cat_info, goods_map):
-    """Build the data structure for one hive."""
-    cats_available = cat_info.get(hive_id, {})
-    goods_for_hive = goods_map.get(hive_id, {})
+def update_hive_data(orig_hive, cat_excel_for_hive, goods_for_hive):
+    """
+    Update a hive's cat_status data using Excel data,
+    while preserving the original cats list, cat_count, and SPU IDs.
 
-    # Get the list of must-have categories
-    cat_names = sorted(cats_available.keys())
-    cat_status = {}
+    - orig_hive: the original hive dict from HTML
+    - cat_excel_for_hive: {cat_name -> {...}} from 品类诊断明细
+    - goods_for_hive: {cat_name -> [items]} from 商品诊断明细
+    """
+    hive_id = str(orig_hive['id'])
+    orig_cats = orig_hive['cats']          # preserve original cat list
+    orig_cat_count = orig_hive['cat_count']  # preserve original count
+    orig_cat_status = orig_hive.get('cat_status', {})
 
-    for cat_name in cat_names:
-        cat_meta = cats_available[cat_name]
-        items = goods_for_hive.get(cat_name, [])
+    new_cat_status = {}
 
-        # Count BM SPUs
-        current_bm_count = sum(1 for it in items if it['is_bm'])
+    for cat_name in orig_cats:
+        orig_cat_data = orig_cat_status.get(cat_name, {})
+        excel_cat = cat_excel_for_hive.get(cat_name, {})
+        excel_goods = goods_for_hive.get(cat_name, [])
+
+        # Build goods_detail: merge original SPU list with Excel data
+        # Strategy: keep original SPUs (by spu_id), update with Excel data if available,
+        # append new SPUs from Excel that don't exist in original
+        orig_goods = orig_cat_data.get('goods_detail', [])
+        orig_spu_ids = [g['spu_id'] for g in orig_goods]
+        orig_goods_by_spu = {g['spu_id']: g for g in orig_goods}
+        excel_goods_by_spu = {g['spu_id']: g for g in excel_goods}
+
+        merged_goods = []
+        # First: update existing SPUs (preserve order from original)
+        for spu_id in orig_spu_ids:
+            if spu_id in excel_goods_by_spu:
+                # Update with new data from Excel
+                merged_goods.append(excel_goods_by_spu[spu_id])
+            else:
+                # SPU not in Excel anymore — keep original data
+                merged_goods.append(orig_goods_by_spu[spu_id])
+
+        # Then: append new SPUs from Excel that weren't in original
+        for spu_id, item in excel_goods_by_spu.items():
+            if spu_id not in orig_goods_by_spu:
+                merged_goods.append(item)
+
+        # Sort by daily desc
+        merged_goods.sort(key=lambda x: -x.get('daily', 0))
+
+        # Recalculate category-level metrics from merged goods
+        items = merged_goods
+        current_bm_count = sum(1 for it in items if it.get('is_bm'))
+
+        # Use Excel cat data if available, else fall back to original
+        base_has_bm = excel_cat.get('base_has_bm', orig_cat_data.get('base_has_bm', 0))
+        is_quality = bool(excel_cat.get('is_quality', orig_cat_data.get('is_quality', 0)))
 
         # Determine is_dabiao
-        base_has_bm = cat_meta.get('base_has_bm', 0)
         if base_has_bm:
             is_dabiao = current_bm_count >= 2
         else:
             is_dabiao = current_bm_count >= 1
-
-        # is_quality from category level
-        is_quality = bool(cat_meta.get('is_quality', 0))
 
         # dabiao_detail text
         if not items:
@@ -314,7 +390,7 @@ def build_hive_data(hive_id, roster_entry, cat_info, goods_map):
                 dabiao_detail = "基期无标杆,当前无标杆"
 
         # Head SPU calculations: use BM SPUs if any, else top 1
-        bm_items = [it for it in items if it['is_bm']]
+        bm_items = [it for it in items if it.get('is_bm')]
         if bm_items:
             head_items = bm_items
         elif items:
@@ -322,16 +398,11 @@ def build_hive_data(hive_id, roster_entry, cat_info, goods_map):
         else:
             head_items = []
 
-        head_daily_sum = r2(sum(it['daily'] for it in head_items))
-        head_thresh_sum = r2(sum(it['threshold'] for it in head_items))
+        head_daily_sum = r2(sum(it.get('daily', 0) for it in head_items))
+        head_thresh_sum = r2(sum(it.get('threshold', 0) for it in head_items))
         pinxiao_multiple = r4(head_daily_sum / head_thresh_sum) if head_thresh_sum > 0 else 0
 
-        # Build goods_detail
-        goods_detail = []
-        for it in items:
-            goods_detail.append(it)
-
-        cat_status[cat_name] = {
+        new_cat_status[cat_name] = {
             'is_dabiao': is_dabiao,
             'is_quality': is_quality,
             'base_has_bm': base_has_bm,
@@ -340,27 +411,31 @@ def build_hive_data(hive_id, roster_entry, cat_info, goods_map):
             'head_daily_sum': head_daily_sum,
             'head_thresh_sum': head_thresh_sum,
             'pinxiao_multiple': pinxiao_multiple,
-            'goods_detail': goods_detail,
+            'goods_detail': merged_goods,
         }
 
+    # Return updated hive — preserving cats, cat_count, bd, group, id
     return {
-        'id': hive_id,
-        'cats': cat_names,
-        'cat_count': len(cat_names),
-        'bd': roster_entry['bd'],
-        'group': roster_entry['group'],
-        'cat_status': cat_status,
+        'id': orig_hive['id'],
+        'cats': orig_cats,           # PRESERVED
+        'cat_count': orig_cat_count, # PRESERVED
+        'bd': orig_hive.get('bd', ''),
+        'group': orig_hive.get('group', ''),
+        'cat_status': new_cat_status,
     }
 
 
 D = {}
-for hive_id, info in roster.items():
-    hive_name = info['name']
-    hive_data = build_hive_data(hive_id, info, cat_data, goods_today)
-    D[hive_name] = hive_data
+for hive_name, orig_hive in orig_D['hives'].items():
+    hive_id = str(orig_hive['id'])
+    cat_excel = cat_data_excel.get(hive_id, {})
+    goods_hive = goods_today.get(hive_id, {})
+    D[hive_name] = update_hive_data(orig_hive, cat_excel, goods_hive)
 
-# Add meta - D must have structure {"hives": {...}, "meta": {...}}
-D_with_meta = {"hives": D, "meta": META}
+# Build D_with_meta — preserve all original top-level keys
+D_with_meta = dict(orig_D)  # copy all original keys (group, all_cats, data_mode, etc.)
+D_with_meta['hives'] = D
+D_with_meta['meta'] = META
 
 print(f"  D蜂窝数: {len(D)}")
 
@@ -430,15 +505,18 @@ for hive_name, hive_data in D.items():
         'catCount': hive_data['cat_count'],
     }
 
-# Yesterday's scores (build from yesterday goods)
+# Yesterday's scores (build from yesterday goods, still preserving original cats)
 yesterday_scores = {}
-for hive_id, info in roster.items():
-    hive_data_y = build_hive_data(hive_id, info, cat_data, goods_yesterday)
+for hive_name, orig_hive in orig_D['hives'].items():
+    hive_id = str(orig_hive['id'])
+    cat_excel = cat_data_excel.get(hive_id, {})
+    goods_hive_y = goods_yesterday.get(hive_id, {})
+    hive_data_y = update_hive_data(orig_hive, cat_excel, goods_hive_y)
     fs, dr, coeff, dab = calc_score(hive_data_y)
     yesterday_scores[hive_id] = {
-        'name': info['name'],
-        'bd': info['bd'],
-        'group': info['group'],
+        'name': hive_name,
+        'bd': orig_hive.get('bd', ''),
+        'group': orig_hive.get('group', ''),
         'finalScore': fs,
         'dabiaoRate': dr,
         'pinxiaoCoeff': coeff,
@@ -459,8 +537,6 @@ def calc_dod(today_val, yesterday_val):
     return r2((today_val - yesterday_val) / abs(yesterday_val) * 100)
 
 # Parse 昨日得分 for MoM reference (标杆达标率)
-# Row 39+ has hive-level data: BD, 联络点, 蜂窝, ..., col9=标杆达标率
-# We'll also get group-level from rows 5-8 and overall from row 4
 def parse_score_sheet(df):
     """Parse 昨日得分/上周得分 sheet for 标杆达标率 at hive, group, overall levels."""
     result = {'overall': 0.0, 'groups': {}, 'hives': {}}
@@ -489,7 +565,7 @@ lastweek_sheet = parse_score_sheet(df_score_lastweek)
 # Build TREND
 trend_hives = {}
 for hid, ts in today_scores.items():
-    ys = yesterday_scores.get(hid, {})
+    ys = yesterday_scores.get(str(hid), {})
     dod = calc_dod(ts['finalScore'], ys.get('finalScore', 0))
 
     # MoM: compare today's dabiao rate with last week's 标杆达标率
@@ -498,7 +574,7 @@ for hid, ts in today_scores.items():
     today_dabiao_rate = ts['dabiaoRate']
     mom = calc_dod(today_dabiao_rate, lw_val) if lw_val else (r2(today_dabiao_rate * 100) if today_dabiao_rate > 0 else 0.0)
 
-    trend_hives[hid] = {'dod': dod, 'mom': mom}
+    trend_hives[str(hid)] = {'dod': dod, 'mom': mom}
 
 # Group-level TREND
 groups = set(ts['group'] for ts in today_scores.values())
@@ -508,7 +584,7 @@ for g in groups:
     if not g_hids:
         continue
     avg_today = sum(today_scores[h]['finalScore'] for h in g_hids) / len(g_hids)
-    avg_yesterday = sum(yesterday_scores.get(h, {}).get('finalScore', 0) for h in g_hids) / len(g_hids)
+    avg_yesterday = sum(yesterday_scores.get(str(h), {}).get('finalScore', 0) for h in g_hids) / len(g_hids)
     dod = calc_dod(avg_today, avg_yesterday)
 
     # MoM from group scores
@@ -521,7 +597,7 @@ for g in groups:
 # Overall TREND
 all_hids = list(today_scores.keys())
 overall_today = sum(today_scores[h]['finalScore'] for h in all_hids) / max(len(all_hids), 1)
-overall_yesterday = sum(yesterday_scores.get(h, {}).get('finalScore', 0) for h in all_hids) / max(len(all_hids), 1)
+overall_yesterday = sum(yesterday_scores.get(str(h), {}).get('finalScore', 0) for h in all_hids) / max(len(all_hids), 1)
 overall_dod = calc_dod(overall_today, overall_yesterday)
 overall_dabiao = sum(today_scores[h]['dabiaoRate'] for h in all_hids) / max(len(all_hids), 1)
 lw_overall = lastweek_sheet.get('overall', 0)
@@ -615,9 +691,7 @@ def js_dumps(obj):
     return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
 
 # 10.1 Replace TREND
-# Pattern: const TREND = { ... };
 trend_js = f"const TREND = {json.dumps(TREND, ensure_ascii=False, indent=2)};"
-# Use regex to find and replace
 pattern = re.compile(r'const TREND\s*=\s*\{.*?\};', re.DOTALL)
 if pattern.search(html):
     html = pattern.sub(trend_js, html, count=1)
@@ -626,7 +700,6 @@ else:
     print("  ✗ TREND pattern not found!")
 
 # 10.2 Append to HISTORY
-# Find const HISTORY = [...];
 pattern_hist = re.compile(r'(const HISTORY\s*=\s*\[)(.*?)(\];)', re.DOTALL)
 match_hist = pattern_hist.search(html)
 if match_hist:
@@ -649,10 +722,7 @@ else:
     print("  Trying alternative TOP10_DATA replacement...")
     idx_start = html.find('const TOP10_DATA')
     if idx_start >= 0:
-        # Find the end: look for next 'const ' after this
-        rest = html[idx_start + 16:]  # skip 'const TOP10_DATA'
-        # Find the semicolon that ends this statement
-        # The data is a big object literal, we need to find the matching end
+        rest = html[idx_start + 16:]
         idx_next_const = rest.find('\nconst ')
         if idx_next_const < 0:
             idx_next_const = rest.find('\n\nconst ')
@@ -665,7 +735,6 @@ else:
         print("  ✗ TOP10_DATA not found!")
 
 # 10.4 Replace D
-# Use brace-counting to find exact end of D object
 d_js = f"const D={json.dumps(D_with_meta, ensure_ascii=False)};\n"
 idx_d_start = html.find('const D={')
 if idx_d_start < 0:
@@ -695,24 +764,23 @@ if idx_d_start >= 0:
         elif ch == '}':
             depth -= 1
             if depth == 0:
-                d_end = i + 1  # include the '}'
+                d_end = i + 1
                 break
     if d_end > 0:
-        # Include the ';' after '}'
         if html[d_end] == ';':
             d_end += 1
         html = html[:idx_d_start] + d_js + html[d_end:]
-        print("  \u2713 D replaced")
+        print("  ✓ D replaced")
     else:
-        print("  \u2717 Could not find D closing brace!")
+        print("  ✗ Could not find D closing brace!")
 else:
-    print("  \u2717 D variable not found!")
+    print("  ✗ D variable not found!")
 
 # 11. Write output
 with open(HTML_PATH, 'w', encoding='utf-8') as f:
     f.write(html)
 print(f"\n✅ Done! Updated {HTML_PATH}")
 print(f"   File size: {len(html.encode('utf-8')):,} bytes")
-print(f"   蜂窝数: {len(D_with_meta.get('hives', D_with_meta))}")
+print(f"   蜂窝数: {len(D_with_meta.get('hives', {}))}")  
 print(f"   TOP10品类: {len(TOP10_DATA)}")
 print(f"   日期: {META['date']}, 考核天数: {META['exam_days']}")
