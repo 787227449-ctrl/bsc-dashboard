@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-用法: python3 update_data.py <当前excel> <基期excel> [html_path]
+用法: python3 update_data.py <excel_path> [html_path]
 默认 html_path = ./june_exam.html
 
 从 Excel 数据更新 Dashboard HTML 中的 JS 变量:
@@ -9,8 +9,6 @@
   - const HISTORY = [...]
   - const TOP10_DATA = {...}
   - BSC_DATA 保持不变
-
-日均单产计算方式：(当前订单 - 基期订单) / 考核天数
 """
 
 import sys
@@ -24,13 +22,12 @@ import numpy as np
 # ============================================================
 # 0. 参数
 # ============================================================
-if len(sys.argv) < 3:
-    print("用法: python3 update_data.py <当前excel> <基期excel> [html_path]")
+if len(sys.argv) < 2:
+    print("用法: python3 update_data.py <excel_path> [html_path]")
     sys.exit(1)
 
-EXCEL_PATH = sys.argv[1]       # 当前数据 Excel（如6月17日）
-BASE_EXCEL_PATH = sys.argv[2]  # 基期数据 Excel（如6月8日）
-HTML_PATH = sys.argv[3] if len(sys.argv) > 3 else os.path.join(os.path.dirname(__file__) or '.', 'june_exam.html')
+EXCEL_PATH = sys.argv[1]
+HTML_PATH = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.path.dirname(__file__) or '.', 'june_exam.html')
 
 META = {
     "date": "2026-06-17",
@@ -152,9 +149,9 @@ for hname, hdata in orig_D['hives'].items():
     orig_hive_id_to_name[str(hdata['id'])] = hname
 
 # ============================================================
-# 1. Read Excel (当前 + 基期)
+# 1. Read Excel
 # ============================================================
-print("\nReading current Excel...")
+print("\nReading Excel...")
 xls = pd.ExcelFile(EXCEL_PATH)
 
 df_roster = pd.read_excel(xls, '花名册')
@@ -163,19 +160,6 @@ df_goods = pd.read_excel(xls, '商品诊断明细')
 df_yesterday_goods = pd.read_excel(xls, '昨日商品诊断')
 df_score_yesterday = pd.read_excel(xls, '昨日得分', header=None)
 df_score_lastweek = pd.read_excel(xls, '上周得分', header=None)
-
-print("Reading base period Excel...")
-xls_base = pd.ExcelFile(BASE_EXCEL_PATH)
-df_goods_base = pd.read_excel(xls_base, '商品诊断明细')
-
-# Build base period SPU-ID -> 拼好饭订单 mapping
-base_orders_map = {}  # {spu_id_str: orders}
-for _, row in df_goods_base.iterrows():
-    spu_id = safe_str(row.get('SPU-ID'))
-    if spu_id:
-        orders = safe_float(row.get('拼好饭订单'))
-        base_orders_map[spu_id] = orders
-print(f"  基期 SPU 数: {len(base_orders_map)}")
 
 # ============================================================
 # 2. Build roster mapping (考核==1)
@@ -199,6 +183,8 @@ print(f"  考核蜂窝数: {len(roster)}")
 # 3. Build category-level data from 品类诊断明细 (indexed by hive_id + cat)
 # ============================================================
 print("Building category data from Excel...")
+# This builds a lookup: {hive_id -> {cat_name -> {...}}} for ALL cats in Excel
+# We'll use it later to update only the cats that exist in original D
 cat_data_excel = {}  # hive_id -> {cat_name -> {...}}
 for _, row in df_cat.iterrows():
     hid = safe_str(row.get('蜂窝ID'))
@@ -225,13 +211,8 @@ for _, row in df_cat.iterrows():
 # ============================================================
 print("Building goods detail...")
 
-def build_goods_from_df(df, roster_hids=None, use_base_deduction=False):
-    """Parse goods dataframe and return {hive_id -> {cat -> [items]}}.
-    
-    If use_base_deduction=True, daily is calculated as:
-      (current_orders - base_orders) / META['exam_days']
-    instead of using the Excel '日均单产（自然日）' field.
-    """
+def build_goods_from_df(df, roster_hids=None):
+    """Parse goods dataframe and return {hive_id -> {cat -> [items]}}."""
     goods = {}
     for _, row in df.iterrows():
         hid = safe_str(row.get('蜂窝ID'))
@@ -241,24 +222,13 @@ def build_goods_from_df(df, roster_hids=None, use_base_deduction=False):
         if not cat:
             continue
 
-        total_orders = safe_float(row.get('拼好饭订单'))
+        daily_nat = safe_float(row.get('日均单产（自然日）'))
+        daily_plain = safe_float(row.get('日均单产'))
+        daily = daily_nat if daily_nat > 0 else daily_plain
         threshold = safe_float(row.get('标杆单产阈值'))
-
-        if use_base_deduction:
-            # 考核期日均单产 = (当前订单 - 基期订单) / 考核天数
-            spu_id_str = safe_str(row.get('SPU-ID'))
-            base_orders = base_orders_map.get(spu_id_str, 0.0)
-            exam_orders = total_orders - base_orders
-            daily = exam_orders / META['exam_days'] if META['exam_days'] > 0 else 0.0
-            daily = max(daily, 0.0)  # 防止负数
-        else:
-            daily_nat = safe_float(row.get('日均单产（自然日）'))
-            daily_plain = safe_float(row.get('日均单产'))
-            daily = daily_nat if daily_nat > 0 else daily_plain
-
-        # Recalculate diff and is_bm based on (possibly new) daily
-        diff = r2(daily - threshold) if threshold > 0 else 0.0
-        is_bm = 1 if (daily >= threshold and threshold > 0) else 0
+        diff = safe_float(row.get('距离标杆阈值差距'))
+        total_orders = safe_float(row.get('拼好饭订单'))
+        is_bm = safe_bool(row.get('[标杆]达标商品'))
         is_quality = safe_bool(row.get('[质量]达标商品'))
 
         # Status
@@ -266,7 +236,7 @@ def build_goods_from_df(df, roster_hids=None, use_base_deduction=False):
             status = "bm"
         elif diff >= -2 and diff < 0:
             status = "near"
-        elif daily == 0:
+        elif total_orders == 0 or daily == 0:
             status = "zero"
         else:
             status = "active"
@@ -339,8 +309,8 @@ def build_goods_from_df(df, roster_hids=None, use_base_deduction=False):
 
 # Collect all hive IDs that appear in original D
 orig_hive_ids = set(str(h['id']) for h in orig_D['hives'].values())
-goods_today = build_goods_from_df(df_goods, orig_hive_ids, use_base_deduction=True)
-goods_yesterday = build_goods_from_df(df_yesterday_goods, orig_hive_ids, use_base_deduction=False)
+goods_today = build_goods_from_df(df_goods, orig_hive_ids)
+goods_yesterday = build_goods_from_df(df_yesterday_goods, orig_hive_ids)
 
 # ============================================================
 # 5. Build D object — preserving original structure
@@ -351,10 +321,14 @@ def update_hive_data(orig_hive, cat_excel_for_hive, goods_for_hive):
     """
     Update a hive's cat_status data using Excel data,
     while preserving the original cats list, cat_count, and SPU IDs.
+
+    - orig_hive: the original hive dict from HTML
+    - cat_excel_for_hive: {cat_name -> {...}} from 品类诊断明细
+    - goods_for_hive: {cat_name -> [items]} from 商品诊断明细
     """
     hive_id = str(orig_hive['id'])
-    orig_cats = orig_hive['cats']
-    orig_cat_count = orig_hive['cat_count']
+    orig_cats = orig_hive['cats']          # preserve original cat list
+    orig_cat_count = orig_hive['cat_count']  # preserve original count
     orig_cat_status = orig_hive.get('cat_status', {})
 
     new_cat_status = {}
@@ -364,35 +338,47 @@ def update_hive_data(orig_hive, cat_excel_for_hive, goods_for_hive):
         excel_cat = cat_excel_for_hive.get(cat_name, {})
         excel_goods = goods_for_hive.get(cat_name, [])
 
+        # Build goods_detail: merge original SPU list with Excel data
+        # Strategy: keep original SPUs (by spu_id), update with Excel data if available,
+        # append new SPUs from Excel that don't exist in original
         orig_goods = orig_cat_data.get('goods_detail', [])
         orig_spu_ids = [g['spu_id'] for g in orig_goods]
         orig_goods_by_spu = {g['spu_id']: g for g in orig_goods}
         excel_goods_by_spu = {g['spu_id']: g for g in excel_goods}
 
         merged_goods = []
+        # First: update existing SPUs (preserve order from original)
         for spu_id in orig_spu_ids:
             if spu_id in excel_goods_by_spu:
+                # Update with new data from Excel
                 merged_goods.append(excel_goods_by_spu[spu_id])
             else:
+                # SPU not in Excel anymore — keep original data
                 merged_goods.append(orig_goods_by_spu[spu_id])
 
+        # Then: append new SPUs from Excel that weren't in original
         for spu_id, item in excel_goods_by_spu.items():
             if spu_id not in orig_goods_by_spu:
                 merged_goods.append(item)
 
+        # Sort by daily desc
         merged_goods.sort(key=lambda x: -x.get('daily', 0))
 
+        # Recalculate category-level metrics from merged goods
         items = merged_goods
         current_bm_count = sum(1 for it in items if it.get('is_bm'))
 
+        # Use Excel cat data if available, else fall back to original
         base_has_bm = excel_cat.get('base_has_bm', orig_cat_data.get('base_has_bm', 0))
         is_quality = bool(excel_cat.get('is_quality', orig_cat_data.get('is_quality', 0)))
 
+        # Determine is_dabiao
         if base_has_bm:
             is_dabiao = current_bm_count >= 2
         else:
             is_dabiao = current_bm_count >= 1
 
+        # dabiao_detail text
         if not items:
             dabiao_detail = "无数据"
         elif base_has_bm:
@@ -403,11 +389,12 @@ def update_hive_data(orig_hive, cat_excel_for_hive, goods_for_hive):
             else:
                 dabiao_detail = "基期无标杆,当前无标杆"
 
+        # Head SPU calculations: use BM SPUs if any, else top 1
         bm_items = [it for it in items if it.get('is_bm')]
         if bm_items:
             head_items = bm_items
         elif items:
-            head_items = [items[0]]
+            head_items = [items[0]]  # top by daily
         else:
             head_items = []
 
@@ -427,10 +414,11 @@ def update_hive_data(orig_hive, cat_excel_for_hive, goods_for_hive):
             'goods_detail': merged_goods,
         }
 
+    # Return updated hive — preserving cats, cat_count, bd, group, id
     return {
         'id': orig_hive['id'],
-        'cats': orig_cats,
-        'cat_count': orig_cat_count,
+        'cats': orig_cats,           # PRESERVED
+        'cat_count': orig_cat_count, # PRESERVED
         'bd': orig_hive.get('bd', ''),
         'group': orig_hive.get('group', ''),
         'cat_status': new_cat_status,
@@ -444,7 +432,8 @@ for hive_name, orig_hive in orig_D['hives'].items():
     goods_hive = goods_today.get(hive_id, {})
     D[hive_name] = update_hive_data(orig_hive, cat_excel, goods_hive)
 
-D_with_meta = dict(orig_D)
+# Build D_with_meta — preserve all original top-level keys
+D_with_meta = dict(orig_D)  # copy all original keys (group, all_cats, data_mode, etc.)
 D_with_meta['hives'] = D
 D_with_meta['meta'] = META
 
@@ -501,6 +490,7 @@ def calc_score(hive_data):
     return final_score, r4(dabiao_rate), coeff, dabiao_count
 
 
+# Today's scores
 today_scores = {}
 for hive_name, hive_data in D.items():
     fs, dr, coeff, dab = calc_score(hive_data)
@@ -515,6 +505,7 @@ for hive_name, hive_data in D.items():
         'catCount': hive_data['cat_count'],
     }
 
+# Yesterday's scores (build from yesterday goods, still preserving original cats)
 yesterday_scores = {}
 for hive_name, orig_hive in orig_D['hives'].items():
     hive_id = str(orig_hive['id'])
@@ -545,34 +536,47 @@ def calc_dod(today_val, yesterday_val):
         return r2(today_val * 100) if today_val > 0 else 0.0
     return r2((today_val - yesterday_val) / abs(yesterday_val) * 100)
 
+# Parse 昨日得分 for MoM reference (标杆达标率)
 def parse_score_sheet(df):
-    """Parse 昨日得分/上周得分 sheet for 标杆达标率."""
+    """Parse 昨日得分/上周得分 sheet for 标杆达标率 at hive, group, overall levels."""
     result = {'overall': 0.0, 'groups': {}, 'hives': {}}
+
+    # Overall: row 4, col 9 (标杆达标率)
     if len(df) > 4:
         result['overall'] = safe_float(df.iloc[4, 9])
+
+    # Groups: rows 5-8
     for i in range(5, min(9, len(df))):
         group_name = safe_str(df.iloc[i, 0])
         if group_name:
             result['groups'][group_name] = safe_float(df.iloc[i, 9])
+
+    # Hives: rows 41+
     for i in range(41, len(df)):
         hive_name = safe_str(df.iloc[i, 2])
         if hive_name:
             result['hives'][hive_name] = safe_float(df.iloc[i, 9])
+
     return result
 
 yesterday_sheet = parse_score_sheet(df_score_yesterday)
 lastweek_sheet = parse_score_sheet(df_score_lastweek)
 
+# Build TREND
 trend_hives = {}
 for hid, ts in today_scores.items():
     ys = yesterday_scores.get(str(hid), {})
     dod = calc_dod(ts['finalScore'], ys.get('finalScore', 0))
+
+    # MoM: compare today's dabiao rate with last week's 标杆达标率
     hive_name = ts['name']
     lw_val = lastweek_sheet['hives'].get(hive_name, 0)
     today_dabiao_rate = ts['dabiaoRate']
     mom = calc_dod(today_dabiao_rate, lw_val) if lw_val else (r2(today_dabiao_rate * 100) if today_dabiao_rate > 0 else 0.0)
+
     trend_hives[str(hid)] = {'dod': dod, 'mom': mom}
 
+# Group-level TREND
 groups = set(ts['group'] for ts in today_scores.values())
 trend_groups = {}
 for g in groups:
@@ -582,11 +586,15 @@ for g in groups:
     avg_today = sum(today_scores[h]['finalScore'] for h in g_hids) / len(g_hids)
     avg_yesterday = sum(yesterday_scores.get(str(h), {}).get('finalScore', 0) for h in g_hids) / len(g_hids)
     dod = calc_dod(avg_today, avg_yesterday)
+
+    # MoM from group scores
     lw_val = lastweek_sheet['groups'].get(g, 0)
     avg_dabiao = sum(today_scores[h]['dabiaoRate'] for h in g_hids) / len(g_hids)
     mom = calc_dod(avg_dabiao, lw_val) if lw_val else 0.0
+
     trend_groups[g] = {'dod': dod, 'mom': mom}
 
+# Overall TREND
 all_hids = list(today_scores.keys())
 overall_today = sum(today_scores[h]['finalScore'] for h in all_hids) / max(len(all_hids), 1)
 overall_yesterday = sum(yesterday_scores.get(str(h), {}).get('finalScore', 0) for h in all_hids) / max(len(all_hids), 1)
@@ -606,24 +614,18 @@ TREND = {
 # ============================================================
 print("Building TOP10_DATA...")
 
-# Use base deduction for daily calculation (same as D object)
+# Collect all goods across all hives, grouped by 宽前端三级品类
 all_cat_goods = {}
 for _, row in df_goods.iterrows():
     cat = safe_str(row.get('宽前端三级品类'))
     if not cat:
         continue
 
-    # 考核期日均单产 = (当前订单 - 基期订单) / 考核天数
-    spu_id_str = safe_str(row.get('SPU-ID'))
-    current_orders = safe_float(row.get('拼好饭订单'))
-    base_orders = base_orders_map.get(spu_id_str, 0.0)
-    exam_orders = current_orders - base_orders
-    daily = max(exam_orders / META['exam_days'], 0.0) if META['exam_days'] > 0 else 0.0
+    daily_nat = safe_float(row.get('日均单产（自然日）'))
+    daily_plain = safe_float(row.get('日均单产'))
+    daily = daily_nat if daily_nat > 0 else daily_plain
     if daily <= 0:
         continue
-
-    threshold = safe_float(row.get('标杆单产阈值'))
-    is_bm = 1 if (daily >= threshold and threshold > 0) else 0
 
     hid = safe_str(row.get('蜂窝ID'))
     hive_name = safe_str(row.get('蜂窝名称'))
@@ -645,7 +647,7 @@ for _, row in df_goods.iterrows():
         'pickup': safe_bool(row.get('是否开通到店自取')),
         'hot': safe_bool(row.get('周期内是否爆品')),
         'score': r2(safe_float(row.get('商品分'))),
-        'benchmark': is_bm,
+        'benchmark': safe_bool(row.get('[标杆]达标商品')),
     }
 
     if cat not in all_cat_goods:
@@ -656,7 +658,7 @@ TOP10_DATA = {}
 for cat, items in all_cat_goods.items():
     items.sort(key=lambda x: -x['output'])
     top10 = items[:10]
-    std_names = list(dict.fromkeys(it['std'] for it in items if it['std']))
+    std_names = list(dict.fromkeys(it['std'] for it in items if it['std']))  # dedup preserving order
     TOP10_DATA[cat] = {
         'std_names': std_names,
         'items': top10,
@@ -716,6 +718,7 @@ if pattern_top10.search(html):
     html = pattern_top10.sub(top10_js, html, count=1)
     print("  ✓ TOP10_DATA replaced")
 else:
+    # Try alternative: find from 'const TOP10_DATA' to next 'const '
     print("  Trying alternative TOP10_DATA replacement...")
     idx_start = html.find('const TOP10_DATA')
     if idx_start >= 0:
@@ -778,6 +781,6 @@ with open(HTML_PATH, 'w', encoding='utf-8') as f:
     f.write(html)
 print(f"\n✅ Done! Updated {HTML_PATH}")
 print(f"   File size: {len(html.encode('utf-8')):,} bytes")
-print(f"   蜂窝数: {len(D_with_meta.get('hives', {}))}")
+print(f"   蜂窝数: {len(D_with_meta.get('hives', {}))}")  
 print(f"   TOP10品类: {len(TOP10_DATA)}")
 print(f"   日期: {META['date']}, 考核天数: {META['exam_days']}")
