@@ -339,7 +339,7 @@ def build_goods_from_df(df, roster_hids=None, use_base_deduction=False):
 
 # Collect all hive IDs that appear in original D
 orig_hive_ids = set(str(h['id']) for h in orig_D['hives'].values())
-goods_today = build_goods_from_df(df_goods, orig_hive_ids, use_base_deduction=True)
+goods_today = build_goods_from_df(df_goods, orig_hive_ids, use_base_deduction=False)
 goods_yesterday = build_goods_from_df(df_yesterday_goods, orig_hive_ids, use_base_deduction=False)
 
 # ============================================================
@@ -613,12 +613,11 @@ for _, row in df_goods.iterrows():
     if not cat:
         continue
 
-    # 考核期日均单产 = (当前订单 - 基期订单) / 考核天数
+    # 日均单产直接用 Excel 已算好的字段
     spu_id_str = safe_str(row.get('SPU-ID'))
-    current_orders = safe_float(row.get('拼好饭订单'))
-    base_orders = base_orders_map.get(spu_id_str, 0.0)
-    exam_orders = current_orders - base_orders
-    daily = max(exam_orders / META['exam_days'], 0.0) if META['exam_days'] > 0 else 0.0
+    daily_nat = safe_float(row.get('日均单产（自然日）'))
+    daily_plain = safe_float(row.get('日均单产'))
+    daily = daily_nat if daily_nat > 0 else daily_plain
     if daily <= 0:
         continue
 
@@ -858,10 +857,9 @@ for _, row in df_goods.iterrows():
     group = safe_str(row.get('联络点'))
     cat = safe_str(row.get('宽前端三级品类'))
 
-    current_orders = safe_float(row.get('拼好饭订单'))
-    base_orders = base_orders_map.get(spu_id, 0.0)
-    exam_orders = current_orders - base_orders
-    daily = r2(max(exam_orders / META['exam_days'], 0.0) if META['exam_days'] > 0 else 0.0)
+    daily_nat = safe_float(row.get('日均单产（自然日）'))
+    daily_plain = safe_float(row.get('日均单产'))
+    daily = r2(daily_nat if daily_nat > 0 else daily_plain)
 
     threshold = r2(safe_float(row.get('标杆单产阈值')))
     is_bm = 1 if (daily >= threshold and threshold > 0) else 0
