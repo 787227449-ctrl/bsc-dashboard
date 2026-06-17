@@ -901,8 +901,10 @@ if match_hist_ph:
             existing_list = json.loads(existing_raw)
         except Exception:
             existing_list = []
-    # Remove any existing entry with same date, then append new one
-    existing_list = [e for e in existing_list if e.get('date') != history_entry['date']]
+    # 新考核周期起始日（6月17日为本期考核开始，之前旧数据全部丞弃）
+    EXAM_START_DATE = '2026-06-17'
+    # 清除早于考核起始日的旧数据，再去重当天，最后追加
+    existing_list = [e for e in existing_list if e.get('date', '') >= EXAM_START_DATE and e.get('date') != history_entry['date']]
     existing_list.append(history_entry)
     new_array = json.dumps(existing_list, ensure_ascii=False)
     html = html[:match_hist_ph.start()] + hist_ph_start + new_array + hist_ph_end + html[match_hist_ph.end():]
