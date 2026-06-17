@@ -624,8 +624,8 @@ function doLogout() {
 
 function showDashboard() {
   const user = getCurrentUser();
-  if (!user) return;
   document.getElementById('loginOverlay').style.display = 'none';
+  if (user) {
   document.getElementById('userBar').style.display = 'flex';
   document.getElementById('userName').textContent = user.name;
   const roleEl = document.getElementById('userRole');
@@ -635,6 +635,7 @@ function showDashboard() {
     document.getElementById('btnAdmin').style.display = 'inline-block';
     document.getElementById('btnUsers').style.display = 'inline-block';
   }
+  } // end if(user)
   loadDataEdits();
   init();
 }
@@ -793,8 +794,7 @@ function renderUserList() {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
-  const user = getCurrentUser();
-  if (user) showDashboard();
+  showDashboard();
 });
 
 if (document.getElementById('loginPass')) {
