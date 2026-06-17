@@ -359,9 +359,8 @@ for hive_id, info in roster.items():
     hive_data = build_hive_data(hive_id, info, cat_data, goods_today)
     D[hive_name] = hive_data
 
-# Add meta
-D_with_meta = dict(D)
-D_with_meta['meta'] = META
+# Add meta - D must have structure {"hives": {...}, "meta": {...}}
+D_with_meta = {"hives": D, "meta": META}
 
 print(f"  D蜂窝数: {len(D)}")
 
@@ -705,4 +704,4 @@ print(f"\n✅ Done! Updated {HTML_PATH}")
 print(f"   File size: {len(html.encode('utf-8')):,} bytes")
 print(f"   蜂窝数: {len(D_with_meta.get('hives', D_with_meta))}")
 print(f"   TOP10品类: {len(TOP10_DATA)}")
-print(f"   日期: {meta['date']}, 考核天数: {meta['exam_days']}")
+print(f"   日期: {META['date']}, 考核天数: {META['exam_days']}")
