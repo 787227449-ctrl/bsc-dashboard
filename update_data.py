@@ -273,15 +273,19 @@ for _, row in df_roster.iterrows():
 print(f"  考核蜂窝数: {len(roster)}")
 
 # ============================================================
-# 3. Build category-level data from 品类诊断明细 (indexed by hive_id + cat)
+# 3. Build category-level data
+#    范围列表（哪些品类是该蜂窝的核心品类）来自「品类诊断明细」。
+#    达标状态（is_quality / has_bm / has_houdu）改为从「商品诊断明细」取诮窝×品类订单量排名 Top 2 SPU 计算。
+#    Top2里只要有一个满足，品类即达标。
 # ============================================================
 print("Building category data from Excel...")
-cat_data_excel = {}  # hive_id -> {cat_name -> {...}}
+
+# 3a. 从 品类诊断明细 获取诮窝核心品类列表 + 阈值 + 基期标杆信息
+cat_meta = {}  # hive_id -> {cat_name -> {threshold, base_has_bm, is_core}}
 for _, row in df_cat.iterrows():
     hid_raw = row.get('蜂窝ID')
     if hid_raw is None or (isinstance(hid_raw, float) and __import__('math').isnan(hid_raw)):
         continue
-    # Convert numeric (e.g. 101019062.0) to clean string '101019062'
     try:
         hid = str(int(float(hid_raw)))
     except (ValueError, TypeError):
@@ -291,18 +295,90 @@ for _, row in df_cat.iterrows():
     cat_name = safe_str(row.get('宽前端三级品类'))
     if not cat_name:
         continue
+    if hid not in cat_meta:
+        cat_meta[hid] = {}
+    cat_meta[hid][cat_name] = {
+        'threshold':   safe_float(row.get('标杆阈值')),
+        'base_has_bm': safe_bool(row.get('是否有标杆-基期')),
+        'real_bm':     safe_bool(row.get('实时标杆')) if '实时标杆' in df_cat.columns else 0,
+        # 同时保留品类诊断明细的品类级达标作为 fallback
+        'cat_is_quality': safe_bool(row.get('质量是否达标')),
+        'cat_has_bm':     safe_bool(row.get('是否有标杆')),
+        'cat_has_houdu':  safe_bool(row.get('厚度是否达标')),
+    }
+
+# 3b. 从 商品诊断明细 取每个 诮窝×品类 的 Top2 SPU ，重新计算品类达标状态
+cat_data_excel = {}  # hive_id -> {cat_name -> {...}}
+
+# 首先收集商品诊断明细里每个 (hive, cat) 的所有 SPU
+spu_by_hive_cat = {}  # (hive_id, cat_name) -> list of rows
+for _, row in df_goods.iterrows():
+    hid_raw = row.get('蜂窝ID')
+    if hid_raw is None or (isinstance(hid_raw, float) and __import__('math').isnan(hid_raw)):
+        continue
+    try:
+        hid = str(int(float(hid_raw)))
+    except (ValueError, TypeError):
+        hid = safe_str(hid_raw)
+    if not hid:
+        continue
+    # 只看核心品类
+    is_core = safe_bool(row.get('是否核心品类'))
+    if not is_core:
+        continue
+    cat_name = safe_str(row.get('宽前端三级品类'))
+    if not cat_name:
+        continue
+    key = (hid, cat_name)
+    if key not in spu_by_hive_cat:
+        spu_by_hive_cat[key] = []
+    spu_by_hive_cat[key].append(row)
+
+# 对每个 (hive, cat)，按诮窝×品类订单量排名取 Top2，OR合并达标状态
+for (hid, cat_name), spus in spu_by_hive_cat.items():
+    # 按排名升序排列，取前2
+    def _rank(r):
+        v = r.get('诮窝x品类本月订单量排名')
+        try: return int(float(v))
+        except: return 9999
+    top2 = sorted(spus, key=_rank)[:2]
+
+    # OR合并：Top2里只要有一个达标就算
+    is_quality = any(safe_bool(r.get('质量是否达标')) for r in top2)
+    has_bm     = any(safe_bool(r.get('是否有标杆'))     for r in top2)
+    has_houdu  = any(safe_bool(r.get('厚度是否达标'))  for r in top2)
+    base_has_bm_top2 = any(safe_bool(r.get('是否有标杆-基期')) for r in top2)
+
+    # fallback: 如果商品明细缺少该品类 SPU，用品类诊断明细的品类级达标作备用
+    meta = cat_meta.get(hid, {}).get(cat_name, {})
 
     if hid not in cat_data_excel:
         cat_data_excel[hid] = {}
-
     cat_data_excel[hid][cat_name] = {
-        'threshold': safe_float(row.get('标杆阈值')),
-        'is_quality': safe_bool(row.get('质量是否达标')),
-        'has_bm': safe_bool(row.get('是否有标杆')),
-        'base_has_bm': safe_bool(row.get('是否有标杆-基期')),
-        'has_houdu': safe_bool(row.get('厚度是否达标')),
-        'real_bm': safe_bool(row.get('实时标杆')) if '实时标杆' in df_cat.columns else 0,
+        'threshold':   meta.get('threshold', 0),
+        'is_quality':  is_quality,
+        'has_bm':      has_bm,
+        'base_has_bm': base_has_bm_top2 or meta.get('base_has_bm', 0),
+        'has_houdu':   has_houdu,
+        'real_bm':     meta.get('real_bm', 0),
     }
+
+# 补充：品类诊断明细有但商品明细无对应 SPU 的核心品类（用品类级 fallback）
+for hid, cats in cat_meta.items():
+    for cat_name, meta in cats.items():
+        if cat_data_excel.get(hid, {}).get(cat_name) is None:
+            if hid not in cat_data_excel:
+                cat_data_excel[hid] = {}
+            cat_data_excel[hid][cat_name] = {
+                'threshold':   meta.get('threshold', 0),
+                'is_quality':  meta.get('cat_is_quality', 0),
+                'has_bm':      meta.get('cat_has_bm', 0),
+                'base_has_bm': meta.get('base_has_bm', 0),
+                'has_houdu':   meta.get('cat_has_houdu', 0),
+                'real_bm':     meta.get('real_bm', 0),
+            }
+
+print(f'  cat_data_excel 诮窝数: {len(cat_data_excel)}, 示例 TOP2逻辑已应用')
 
 # ============================================================
 # 4. Build goods detail from 商品诊断明细
