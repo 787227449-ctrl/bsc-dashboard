@@ -688,90 +688,140 @@ def js_dumps(obj):
     """Convert Python object to JS-compatible string (using json.dumps)."""
     return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
 
+# Helper: replace between placeholder comments
+def replace_placeholder(html, var_decl, ph_start, ph_end, new_value):
+    """Replace content between /*PH_START*/ and /*PH_END*/ comments."""
+    ph_pattern = re.compile(
+        re.escape(ph_start) + r'.*?' + re.escape(ph_end),
+        re.DOTALL
+    )
+    replacement = ph_start + new_value + ph_end
+    new_html, count = ph_pattern.subn(replacement, html, count=1)
+    return new_html, count > 0
+
 # 10.1 Replace TREND
-trend_js = f"const TREND = {json.dumps(TREND, ensure_ascii=False, indent=2)};"
-pattern = re.compile(r'const TREND\s*=\s*\{.*?\};', re.DOTALL)
-if pattern.search(html):
-    html = pattern.sub(trend_js, html, count=1)
-    print("  ✓ TREND replaced")
+trend_js_val = json.dumps(TREND, ensure_ascii=False, indent=2)
+trend_js = f"const TREND = /*TREND_PLACEHOLDER*/{trend_js_val}/*END_TREND*/;"
+# Try placeholder approach first
+html, ok = replace_placeholder(html, 'const TREND = ', '/*TREND_PLACEHOLDER*/', '/*END_TREND*/', trend_js_val)
+if ok:
+    print("  ✓ TREND replaced (placeholder)")
 else:
-    print("  ✗ TREND pattern not found!")
+    # Fallback: old regex
+    pattern = re.compile(r'const TREND\s*=\s*\{.*?\};', re.DOTALL)
+    if pattern.search(html):
+        html = pattern.sub(f"const TREND = /*TREND_PLACEHOLDER*/{trend_js_val}/*END_TREND*/;", html, count=1)
+        print("  ✓ TREND replaced (regex fallback)")
+    else:
+        print("  ✗ TREND pattern not found!")
 
 # 10.2 Append to HISTORY
-pattern_hist = re.compile(r'(const HISTORY\s*=\s*\[)(.*?)(\];)', re.DOTALL)
-match_hist = pattern_hist.search(html)
-if match_hist:
-    existing = match_hist.group(2).rstrip().rstrip(',')
-    new_entry = json.dumps(history_entry, ensure_ascii=False)
-    new_history = f"{match_hist.group(1)}{existing},{new_entry}];"
-    html = html[:match_hist.start()] + new_history + html[match_hist.end():]
-    print("  ✓ HISTORY appended")
+# Try placeholder approach: replace the content between placeholders
+hist_ph_start = '/*HISTORY_PLACEHOLDER*/'
+hist_ph_end = '/*END_HISTORY*/'
+ph_pattern_hist = re.compile(re.escape(hist_ph_start) + r'(.*?)' + re.escape(hist_ph_end), re.DOTALL)
+match_hist_ph = ph_pattern_hist.search(html)
+new_entry = json.dumps(history_entry, ensure_ascii=False)
+if match_hist_ph:
+    existing_raw = match_hist_ph.group(1).strip()
+    # existing_raw is a JSON array content (without [ and ])
+    if existing_raw == '[]' or existing_raw == '':
+        existing_raw = ''
+    else:
+        # strip outer brackets if present
+        if existing_raw.startswith('[') and existing_raw.endswith(']'):
+            existing_raw = existing_raw[1:-1]
+        existing_raw = existing_raw.rstrip().rstrip(',')
+    new_array = '[' + (existing_raw + ',' if existing_raw else '') + new_entry + ']'
+    html = html[:match_hist_ph.start()] + hist_ph_start + new_array + hist_ph_end + html[match_hist_ph.end():]
+    print("  ✓ HISTORY appended (placeholder)")
 else:
-    print("  ✗ HISTORY pattern not found!")
+    # Fallback: old regex
+    pattern_hist = re.compile(r'(const HISTORY\s*=\s*\[)(.*?)(\];)', re.DOTALL)
+    match_hist = pattern_hist.search(html)
+    if match_hist:
+        existing = match_hist.group(2).rstrip().rstrip(',')
+        new_history = f"{match_hist.group(1)}{existing},{new_entry}];"
+        html = html[:match_hist.start()] + new_history + html[match_hist.end():]
+        print("  ✓ HISTORY appended (regex fallback)")
+    else:
+        print("  ✗ HISTORY pattern not found!")
 
 # 10.3 Replace TOP10_DATA
-pattern_top10 = re.compile(r'const TOP10_DATA\s*=\s*\{.*?\};\s*(?=const |function |//|<)', re.DOTALL)
-top10_js = f"const TOP10_DATA = {json.dumps(TOP10_DATA, ensure_ascii=False)};\n"
-if pattern_top10.search(html):
-    html = pattern_top10.sub(top10_js, html, count=1)
-    print("  ✓ TOP10_DATA replaced")
+top10_val = json.dumps(TOP10_DATA, ensure_ascii=False)
+top10_js = f"const TOP10_DATA = /*TOP10_PLACEHOLDER*/{top10_val}/*END_TOP10*/;\n"
+html, ok = replace_placeholder(html, 'const TOP10_DATA = ', '/*TOP10_PLACEHOLDER*/', '/*END_TOP10*/', top10_val)
+if ok:
+    print("  ✓ TOP10_DATA replaced (placeholder)")
 else:
-    print("  Trying alternative TOP10_DATA replacement...")
-    idx_start = html.find('const TOP10_DATA')
-    if idx_start >= 0:
-        rest = html[idx_start + 16:]
-        idx_next_const = rest.find('\nconst ')
-        if idx_next_const < 0:
-            idx_next_const = rest.find('\n\nconst ')
-        if idx_next_const >= 0:
-            html = html[:idx_start] + top10_js + html[idx_start + 16 + idx_next_const:]
-            print("  ✓ TOP10_DATA replaced (alt method)")
-        else:
-            print("  ✗ Could not find TOP10_DATA end!")
+    # Fallback: old approaches
+    pattern_top10 = re.compile(r'const TOP10_DATA\s*=\s*\{.*?\};\s*(?=const |function |//|<)', re.DOTALL)
+    if pattern_top10.search(html):
+        html = pattern_top10.sub(f"const TOP10_DATA = /*TOP10_PLACEHOLDER*/{top10_val}/*END_TOP10*/;\n", html, count=1)
+        print("  ✓ TOP10_DATA replaced (regex fallback)")
     else:
-        print("  ✗ TOP10_DATA not found!")
+        idx_start = html.find('const TOP10_DATA')
+        if idx_start >= 0:
+            rest = html[idx_start + 16:]
+            idx_next_const = rest.find('\nconst ')
+            if idx_next_const < 0:
+                idx_next_const = rest.find('\n\nconst ')
+            if idx_next_const >= 0:
+                html = html[:idx_start] + f"const TOP10_DATA = /*TOP10_PLACEHOLDER*/{top10_val}/*END_TOP10*/;\n" + html[idx_start + 16 + idx_next_const:]
+                print("  ✓ TOP10_DATA replaced (alt method)")
+            else:
+                print("  ✗ Could not find TOP10_DATA end!")
+        else:
+            print("  ✗ TOP10_DATA not found!")
 
 # 10.4 Replace D
-d_js = f"const D={json.dumps(D_with_meta, ensure_ascii=False)};\n"
-idx_d_start = html.find('const D={')
-if idx_d_start < 0:
-    idx_d_start = html.find('const D =')
-if idx_d_start >= 0:
-    brace_start = html.find('{', idx_d_start)
-    depth = 0
-    in_string = False
-    escape_next = False
-    d_end = -1
-    for i in range(brace_start, len(html)):
-        ch = html[i]
-        if escape_next:
-            escape_next = False
-            continue
-        if ch == '\\':
-            if in_string:
-                escape_next = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == '{':
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0:
-                d_end = i + 1
-                break
-    if d_end > 0:
-        if html[d_end] == ';':
-            d_end += 1
-        html = html[:idx_d_start] + d_js + html[d_end:]
-        print("  ✓ D replaced")
-    else:
-        print("  ✗ Could not find D closing brace!")
+d_val_js = json.dumps(D_with_meta, ensure_ascii=False)
+d_js = f"const D = /*D_PLACEHOLDER*/{d_val_js}/*END_D*/;\n"
+# Try placeholder approach first
+html, ok = replace_placeholder(html, 'const D = ', '/*D_PLACEHOLDER*/', '/*END_D*/', d_val_js)
+if ok:
+    print("  ✓ D replaced (placeholder)")
 else:
-    print("  ✗ D variable not found!")
+    # Fallback: brace counting
+    idx_d_start = html.find('const D={')
+    if idx_d_start < 0:
+        idx_d_start = html.find('const D =')
+    if idx_d_start >= 0:
+        brace_start = html.find('{', idx_d_start)
+        depth = 0
+        in_string = False
+        escape_next = False
+        d_end = -1
+        for i in range(brace_start, len(html)):
+            ch = html[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\':
+                if in_string:
+                    escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    d_end = i + 1
+                    break
+        if d_end > 0:
+            if d_end < len(html) and html[d_end] == ';':
+                d_end += 1
+            html = html[:idx_d_start] + d_js + html[d_end:]
+            print("  ✓ D replaced (brace fallback)")
+        else:
+            print("  ✗ Could not find D closing brace!")
+    else:
+        print("  ✗ D variable not found!")
 
 # ============================================================
 # 10.5 Build and replace SEARCH_DATA
@@ -839,21 +889,26 @@ for _, row in df_goods.iterrows():
 
 print(f"  SEARCH_DATA 条数: {len(SEARCH_DATA)}")
 
-search_js = f"const SEARCH_DATA = {json.dumps(SEARCH_DATA, ensure_ascii=False)};"
+search_val_js = json.dumps(SEARCH_DATA, ensure_ascii=False)
+search_js = f"const SEARCH_DATA = /*SEARCH_PLACEHOLDER*/{search_val_js}/*END_SEARCH*/;"
 
-# Replace SEARCH_DATA placeholder in HTML
-pattern_search = re.compile(r'const SEARCH_DATA\s*=\s*\[.*?\];', re.DOTALL)
-if pattern_search.search(html):
-    html = pattern_search.sub(search_js, html, count=1)
-    print("  ✓ SEARCH_DATA replaced")
+# Replace SEARCH_DATA - try placeholder first
+html, ok = replace_placeholder(html, 'const SEARCH_DATA = ', '/*SEARCH_PLACEHOLDER*/', '/*END_SEARCH*/', search_val_js)
+if ok:
+    print("  ✓ SEARCH_DATA replaced (placeholder)")
 else:
-    # Insert before </script> of the data block (after TOP10_DATA)
-    insert_marker = '// END_DATA_BLOCK'
-    if insert_marker in html:
-        html = html.replace(insert_marker, search_js + '\n' + insert_marker)
-        print("  ✓ SEARCH_DATA inserted at END_DATA_BLOCK")
+    # Fallback: regex
+    pattern_search = re.compile(r'const SEARCH_DATA\s*=\s*\[.*?\];', re.DOTALL)
+    if pattern_search.search(html):
+        html = pattern_search.sub(search_js, html, count=1)
+        print("  ✓ SEARCH_DATA replaced (regex fallback)")
     else:
-        print("  ✗ SEARCH_DATA placeholder not found, skipping")
+        insert_marker = '// END_DATA_BLOCK'
+        if insert_marker in html:
+            html = html.replace(insert_marker, search_js + '\n' + insert_marker)
+            print("  ✓ SEARCH_DATA inserted at END_DATA_BLOCK")
+        else:
+            print("  ✗ SEARCH_DATA placeholder not found, skipping")
 
 # 11. Write output
 with open(HTML_PATH, 'w', encoding='utf-8') as f:
