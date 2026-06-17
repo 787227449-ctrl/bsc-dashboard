@@ -659,19 +659,24 @@ function renderBoardTrendCard(){
   if(!canvas||!HISTORY||HISTORY.length<2)return;
   const dpr=window.devicePixelRatio||1;
   const W=canvas.parentElement.offsetWidth||300;
-  const H=80;
+  const H=100;
   canvas.width=W*dpr;canvas.height=H*dpr;
   canvas.style.width=W+'px';canvas.style.height=H+'px';
   const ctx=canvas.getContext('2d');
   ctx.scale(dpr,dpr);
   const vals=HISTORY.map(h=>h.overall_bm_rate||0);
-  const mn=Math.min(...vals),mx=Math.max(...vals)||0.01;
-  const pad={t:8,b:20,l:8,r:8};
+  // 去重日期，只保留唯一日期数据
+  const seen=new Set();
+  const uniq=HISTORY.filter(h=>{if(seen.has(h.date))return false;seen.add(h.date);return true;});
+  const uVals=uniq.map(h=>h.overall_bm_rate||0);
+  const mn=Math.min(...uVals),mx=Math.max(...uVals);
+  const range=mx-mn||0.01;
+  const pad={t:10,b:24,l:10,r:10};
   const cw=W-pad.l-pad.r,ch=H-pad.t-pad.b;
-  const pts=vals.map((v,i)=>[pad.l+i/(vals.length-1)*cw, pad.t+ch-(v-mn)/(mx-mn||1)*ch]);
-  // 封闭区域渐变色
+  const pts=uVals.map((v,i)=>[pad.l+i/(Math.max(uVals.length-1,1))*cw, pad.t+ch-(v-mn)/range*ch]);
+  // 渐变填充
   const grad=ctx.createLinearGradient(0,pad.t,0,pad.t+ch);
-  grad.addColorStop(0,'rgba(21,101,192,0.18)');grad.addColorStop(1,'rgba(21,101,192,0)');
+  grad.addColorStop(0,'rgba(21,101,192,0.15)');grad.addColorStop(1,'rgba(21,101,192,0)');
   ctx.beginPath();ctx.moveTo(pts[0][0],pts[0][1]);
   pts.slice(1).forEach(p=>ctx.lineTo(p[0],p[1]));
   ctx.lineTo(pts[pts.length-1][0],pad.t+ch);ctx.lineTo(pts[0][0],pad.t+ch);ctx.closePath();
@@ -679,17 +684,23 @@ function renderBoardTrendCard(){
   // 折线
   ctx.beginPath();ctx.moveTo(pts[0][0],pts[0][1]);
   pts.slice(1).forEach(p=>ctx.lineTo(p[0],p[1]));
-  ctx.strokeStyle='#1565C0';ctx.lineWidth=2;ctx.stroke();
-  // X 轴日期标签
-  ctx.fillStyle='#aaa';ctx.font=`${10*dpr/dpr}px sans-serif`;ctx.textAlign='center';
-  HISTORY.forEach((h,i)=>{
-    const x=pts[i][0];
-    ctx.fillText((h.date||'').slice(5),x,H-4);
+  ctx.strokeStyle='#1565C0';ctx.lineWidth=2;ctx.lineJoin='round';ctx.stroke();
+  // 数据点
+  pts.forEach(p=>{ctx.beginPath();ctx.arc(p[0],p[1],3,0,Math.PI*2);ctx.fillStyle='#1565C0';ctx.fill();});
+  // X 轴日期标签（最多显6个，防止拥挤）
+  ctx.fillStyle='#bbb';ctx.font='9px sans-serif';ctx.textAlign='center';
+  const step=Math.ceil(uniq.length/6);
+  uniq.forEach((h,i)=>{
+    if(i%step===0||i===uniq.length-1){
+      ctx.fillText((h.date||'').slice(5),pts[i][0],H-6);
+    }
   });
 }
 function renderBoardFiltered(){
-  const grpF=document.getElementById('bf-grp').value;
-  const bdF=document.getElementById('bf-bd').value;
+  const grpSel=document.getElementById('bf-grp');
+  const bdSel=document.getElementById('bf-bd');
+  const grpF=grpSel?grpSel.value:'';
+  const bdF=bdSel?bdSel.value:'';
   buildBoardGroup(grpF,bdF);
 }
 
