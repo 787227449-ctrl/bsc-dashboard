@@ -884,6 +884,9 @@ for _, row in df_goods.iterrows():
         'pin_dan_bao': safe_bool(row.get('是否开通拼单宝')),
         'zi_qu': safe_bool(row.get('是否开通到店自取')),
         'score': r2(safe_float(row.get('商品分'))),
+        'bm_drop': 1 if str(row.get('标杆掉出', 0)) == '掉出' else 0,
+        'quality_drop': 1 if int(row.get('质量掉出', 0) or 0) == 1 else 0,
+        'thick_drop': 0 if int(row.get('厚度掉出', 0) or 0) == 0 else 1,
     }
     SEARCH_DATA.append(entry)
 
