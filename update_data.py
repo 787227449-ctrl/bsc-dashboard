@@ -32,9 +32,86 @@ EXCEL_PATH = sys.argv[1]       # 当前数据 Excel（如6月17日）
 BASE_EXCEL_PATH = sys.argv[2]  # 基期数据 Excel（如6月8日）
 HTML_PATH = sys.argv[3] if len(sys.argv) > 3 else os.path.join(os.path.dirname(__file__) or '.', 'june_exam.html')
 
+# ── 从 Excel 自动读取考核天数 ──────────────────────────────────────
+def _read_exam_days(excel_path):
+    """从「本月做工池」sheet 的「生效天数」列读取最大值作为考核天数。"""
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
+        if '本月做工池' not in wb.sheetnames:
+            print('  ⚠️  未找到「本月做工池」sheet，考核天数默认用 Excel 挡位规则')
+            return _read_exam_days_from_rule(excel_path)
+        ws = wb['本月做工池']
+        # 找「生效天数」列的列号
+        header_row = None
+        col_idx = None
+        for i, row in enumerate(ws.iter_rows(min_row=1, max_row=3, values_only=True)):
+            for j, val in enumerate(row):
+                if str(val).strip() == '生效天数':
+                    header_row = i + 1
+                    col_idx = j
+                    break
+            if col_idx is not None:
+                break
+        if col_idx is None:
+            print('  ⚠️  未找到「生效天数」列，考核天数默认用挡位规则')
+            return _read_exam_days_from_rule(excel_path)
+        max_days = 0
+        for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+            val = row[col_idx] if col_idx < len(row) else None
+            try:
+                d = int(float(val))
+                if d > max_days:
+                    max_days = d
+            except (TypeError, ValueError):
+                pass
+        wb.close()
+        if max_days > 0:
+            print(f'  ✓ 考核天数（生效天数最大值）: {max_days}')
+            return max_days
+        return _read_exam_days_from_rule(excel_path)
+    except Exception as e:
+        print(f'  ⚠️  读取生效天数异常: {e}，使用挡位规则')
+        return _read_exam_days_from_rule(excel_path)
+
+def _read_exam_days_from_rule(excel_path):
+    """从「挡位规则」sheet 行6读取考核天数（备用）。"""
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
+        if '挡位规则' not in wb.sheetnames:
+            wb.close()
+            return 16
+        ws = wb['挡位规则']
+        for i, row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True)):
+            for val in row:
+                try:
+                    d = int(float(val))
+                    if 1 <= d <= 31:
+                        wb.close()
+                        print(f'  ✓ 考核天数（挡位规则）: {d}')
+                        return d
+                except (TypeError, ValueError):
+                    pass
+        wb.close()
+    except Exception:
+        pass
+    return 16
+
+_exam_days = _read_exam_days(EXCEL_PATH)
+
+# ── 从 Excel 文件名/内容推断日期 ──────────────────────────────────
+import re as _re
+_date_match = _re.search(r'(\d{4})[-_]?(\d{2})[-_]?(\d{2})', os.path.basename(EXCEL_PATH))
+if _date_match:
+    _date_str = f"{_date_match.group(1)}-{_date_match.group(2)}-{_date_match.group(3)}"
+else:
+    from datetime import date as _date
+    _date_str = _date.today().isoformat()
+
 META = {
-    "date": "2026-06-17",
-    "exam_days": 8,
+    "date": _date_str,
+    "exam_days": _exam_days,
     "exam_total_days": 24
 }
 
