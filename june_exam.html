@@ -786,18 +786,96 @@ function buildBoardGroup(grpF='',bdF=''){
           const c2=up?'var(--success)':dn?'var(--danger)':'#888';
           dodHtml=`<span style="font-size:11px;font-weight:600;color:${c2}">DOD ${sign}${diff>=0?'+':''}${diff.toFixed(1)}%</span>`;
         }
-        rows+=`<div style="display:flex;align-items:center;padding:10px 14px;border-bottom:1px solid #f5f5f5;gap:8px">
-          <div style="flex:1;min-width:0">
-            <div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${h.name}</div>
-            <div style="font-size:11px;color:#999;margin-top:1px">BD: ${h.bd||'-'}</div>
+        // 核心品类数量
+        const catStatus=h.cat_status||{};
+        const catCount=Object.keys(catStatus).length;
+        rows+=`<div class="hive-row" data-hive-id="${h.id}" style="cursor:pointer;border-bottom:1px solid #f5f5f5">
+          <div style="display:flex;align-items:center;padding:10px 14px;gap:8px">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${h.name}</div>
+              <div style="font-size:11px;color:#999;margin-top:1px">BD: ${h.bd||'-'} · ${catCount}个核心品类</div>
+            </div>
+            <div style="text-align:right;flex-shrink:0">
+              <div style="font-size:14px;font-weight:700;color:${col}">${pctV}%</div>
+              <div style="margin-top:2px">${dodHtml}</div>
+            </div>
+            <div style="font-size:12px;color:#bbb;margin-left:2px">›</div>
           </div>
-          <div style="text-align:right;flex-shrink:0">
-            <div style="font-size:14px;font-weight:700;color:${col}">${pctV}%</div>
-            <div style="margin-top:2px">${dodHtml}</div>
-          </div>
+          <div class="cat-list" style="display:none"></div>
         </div>`;
       });
       wrap.innerHTML=rows||'<div style="padding:14px;color:#999;font-size:13px">暂无蜂窝数据</div>';
+      // 绑定蜂窝点击事件
+      wrap.querySelectorAll('.hive-row').forEach(row=>{
+        const hiveId=row.dataset.hiveId;
+        const hiveData=D.hives[hiveId]||{};
+        const catList=row.querySelector('.cat-list');
+        row.querySelector('div').addEventListener('click',()=>{
+          const isOpen=catList.style.display!=='none';
+          // 关闭同组其他蜂窝
+          wrap.querySelectorAll('.cat-list').forEach(cl=>cl.style.display='none');
+          wrap.querySelectorAll('.hive-row').forEach(r=>r.style.background='');
+          if(isOpen)return;
+          row.style.background='#f0f4ff';
+          catList.style.display='block';
+          if(catList.innerHTML)return; // 已渲染
+          // 渲染品类列表
+          const cats=hiveData.cat_status||{};
+          // 按品类下所有商品总订单数降序
+          const catArr=Object.entries(cats).map(([name,cs])=>{
+            const totalOrd=(cs.goods_detail||[]).reduce((s,g)=>s+(g.total_orders||0),0);
+            return{name,cs,totalOrd};
+          }).sort((a,b)=>b.totalOrd-a.totalOrd);
+          if(!catArr.length){catList.innerHTML='<div style="padding:10px 14px;font-size:12px;color:#bbb">暂无品类数据</div>';return;}
+          let catHtml='';
+          catArr.forEach(({name,cs,totalOrd},ci)=>{
+            const isBm=cs.is_dabiao;
+            const bmTag=isBm?'<span style="font-size:10px;background:#e8f5e9;color:#2e7d32;border-radius:3px;padding:1px 4px;margin-left:4px">达标</span>':'<span style="font-size:10px;background:#fce4ec;color:#c62828;border-radius:3px;padding:1px 4px;margin-left:4px">未达标</span>';
+            catHtml+=`<div class="cat-row" data-cat-idx="${ci}" style="cursor:pointer;background:#fafbff;border-top:1px solid #eef">
+              <div style="display:flex;align-items:center;padding:9px 14px 9px 20px;gap:6px">
+                <div style="flex:1;font-size:12px;font-weight:600;color:#333">${name}${bmTag}</div>
+                <div style="font-size:11px;color:#888">${totalOrd.toFixed(0)}单 ›</div>
+              </div>
+              <div class="spu-list" style="display:none"></div>
+            </div>`;
+          });
+          catList.innerHTML=catHtml;
+          // 绑定品类点击
+          catList.querySelectorAll('.cat-row').forEach((catRow,ci)=>{
+            const spuList=catRow.querySelector('.spu-list');
+            catRow.querySelector('div').addEventListener('click',()=>{
+              const isOpen2=spuList.style.display!=='none';
+              catList.querySelectorAll('.spu-list').forEach(sl=>sl.style.display='none');
+              catList.querySelectorAll('.cat-row').forEach(cr=>cr.style.background='#fafbff');
+              if(isOpen2)return;
+              catRow.style.background='#eef3ff';
+              spuList.style.display='block';
+              if(spuList.innerHTML)return;
+              const goods=(catArr[ci].cs.goods_detail||[]).slice().sort((a,b)=>(b.total_orders||0)-(a.total_orders||0));
+              if(!goods.length){spuList.innerHTML='<div style="padding:8px 14px 8px 28px;font-size:11px;color:#bbb">暂无商品数据</div>';return;}
+              let spuHtml='';
+              goods.forEach((g,gi)=>{
+                const isBmG=g.is_bm;
+                const statusCol=isBmG?'#2e7d32':'#888';
+                const statusTxt=isBmG?'🏆标杆':'普通';
+                spuHtml+=`<div style="padding:8px 14px 8px 28px;border-top:1px solid #f0f0f0;background:${gi%2===0?'#fff':'#fafafa'}">
+                  <div style="display:flex;align-items:flex-start;gap:6px">
+                    <div style="flex:1;min-width:0">
+                      <div style="font-size:11px;font-weight:500;color:#333;line-height:1.4">${g.spu||'-'}</div>
+                      <div style="font-size:10px;color:#aaa;margin-top:2px">SPU: ${g.spu_id||'-'} · ${g.merchant||''}</div>
+                    </div>
+                    <div style="text-align:right;flex-shrink:0">
+                      <div style="font-size:12px;font-weight:700;color:#333">${(g.total_orders||0).toFixed(0)}单</div>
+                      <div style="font-size:10px;color:${statusCol}">${statusTxt}</div>
+                    </div>
+                  </div>
+                </div>`;
+              });
+              spuList.innerHTML=spuHtml;
+            });
+          });
+        });
+      });
       el.appendChild(wrap);
     };
     card.id='grp-card-'+grp;
