@@ -889,24 +889,27 @@ for _, row in df_goods.iterrows():
 
 print(f"  SEARCH_DATA 条数: {len(SEARCH_DATA)}")
 
-search_val_js = json.dumps(SEARCH_DATA, ensure_ascii=False)
-search_js = f"const SEARCH_DATA = /*SEARCH_PLACEHOLDER*/{search_val_js}/*END_SEARCH*/;"
+# Write SEARCH_DATA to separate JSON file (lazy-load optimization)
+search_json_path = os.path.join(os.path.dirname(os.path.abspath(HTML_PATH)), 'search_data.json')
+with open(search_json_path, 'w', encoding='utf-8') as f:
+    json.dump(SEARCH_DATA, f, ensure_ascii=False, separators=(',', ':'))
+print(f"  ✓ search_data.json 已生成 ({len(SEARCH_DATA)} 条)")
 
-# Replace SEARCH_DATA - try placeholder first
-html, ok = replace_placeholder(html, 'const SEARCH_DATA = ', '/*SEARCH_PLACEHOLDER*/', '/*END_SEARCH*/', search_val_js)
+# HTML SEARCH_DATA = empty array (data loaded on demand via fetch)
+html, ok = replace_placeholder(html, 'const SEARCH_DATA = ', '/*SEARCH_PLACEHOLDER*/', '/*END_SEARCH*/', '[]')
 if ok:
-    print("  ✓ SEARCH_DATA replaced (placeholder)")
+    print("  ✓ SEARCH_DATA placeholder set to [] (lazy-load)")
 else:
-    # Fallback: regex
+    # Fallback: regex replace with empty array
     pattern_search = re.compile(r'const SEARCH_DATA\s*=\s*\[.*?\];', re.DOTALL)
     if pattern_search.search(html):
-        html = pattern_search.sub(search_js, html, count=1)
-        print("  ✓ SEARCH_DATA replaced (regex fallback)")
+        html = pattern_search.sub('const SEARCH_DATA = [];', html, count=1)
+        print("  ✓ SEARCH_DATA replaced with [] (regex fallback)")
     else:
         insert_marker = '// END_DATA_BLOCK'
         if insert_marker in html:
-            html = html.replace(insert_marker, search_js + '\n' + insert_marker)
-            print("  ✓ SEARCH_DATA inserted at END_DATA_BLOCK")
+            html = html.replace(insert_marker, 'const SEARCH_DATA = [];\n' + insert_marker)
+            print("  ✓ SEARCH_DATA=[] inserted at END_DATA_BLOCK")
         else:
             print("  ✗ SEARCH_DATA placeholder not found, skipping")
 
