@@ -201,7 +201,14 @@ print(f"  考核蜂窝数: {len(roster)}")
 print("Building category data from Excel...")
 cat_data_excel = {}  # hive_id -> {cat_name -> {...}}
 for _, row in df_cat.iterrows():
-    hid = safe_str(row.get('蜂窝ID'))
+    hid_raw = row.get('蜂窝ID')
+    if hid_raw is None or (isinstance(hid_raw, float) and __import__('math').isnan(hid_raw)):
+        continue
+    # Convert numeric (e.g. 101019062.0) to clean string '101019062'
+    try:
+        hid = str(int(float(hid_raw)))
+    except (ValueError, TypeError):
+        hid = safe_str(hid_raw)
     if not hid:
         continue
     cat_name = safe_str(row.get('宽前端三级品类'))
@@ -234,7 +241,15 @@ def build_goods_from_df(df, roster_hids=None, use_base_deduction=False):
     """
     goods = {}
     for _, row in df.iterrows():
-        hid = safe_str(row.get('蜂窝ID'))
+        hid_raw = row.get('蜂窝ID')
+        if hid_raw is None or (isinstance(hid_raw, float) and __import__('math').isnan(hid_raw)):
+            continue
+        try:
+            hid = str(int(float(hid_raw)))
+        except (ValueError, TypeError):
+            hid = safe_str(hid_raw)
+        if not hid:
+            continue
         if roster_hids and hid not in roster_hids:
             continue
         cat = safe_str(row.get('宽前端三级品类'))
@@ -343,62 +358,50 @@ goods_today = build_goods_from_df(df_goods, orig_hive_ids, use_base_deduction=Fa
 goods_yesterday = build_goods_from_df(df_yesterday_goods, orig_hive_ids, use_base_deduction=False)
 
 # ============================================================
-# 5. Build D object — preserving original structure
+# 5. Build D object — using Excel cat list as source of truth
 # ============================================================
-print("Building D object (preserving original cats/spu_ids)...")
+print("Building D object (using Excel品类诊断明细 as cats source)...")
 
 def update_hive_data(orig_hive, cat_excel_for_hive, goods_for_hive):
     """
-    Update a hive's cat_status data using Excel data,
-    while preserving the original cats list, cat_count, and SPU IDs.
+    Rebuild a hive's cat_status from 品类诊断明细 Excel (all core categories).
+    cats / cat_count are now derived from Excel, not the original 6-cat JSON.
+    SPU goods detail still comes from 商品诊断明细.
     """
     hive_id = str(orig_hive['id'])
-    orig_cats = orig_hive['cats']
-    orig_cat_count = orig_hive['cat_count']
     orig_cat_status = orig_hive.get('cat_status', {})
+
+    # Use Excel品类 as the authoritative cat list (全量核心品类)
+    # cat_excel_for_hive: {cat_name -> {threshold, is_quality, has_bm, base_has_bm, has_houdu, ...}}
+    excel_cats = list(cat_excel_for_hive.keys())
+    if not excel_cats:
+        # Fallback to original cats if Excel has no data for this hive
+        excel_cats = orig_hive.get('cats', [])
 
     new_cat_status = {}
 
-    for cat_name in orig_cats:
-        orig_cat_data = orig_cat_status.get(cat_name, {})
+    for cat_name in excel_cats:
         excel_cat = cat_excel_for_hive.get(cat_name, {})
         excel_goods = goods_for_hive.get(cat_name, [])
+        orig_cat_data = orig_cat_status.get(cat_name, {})
 
-        orig_goods = orig_cat_data.get('goods_detail', [])
-        orig_spu_ids = [g['spu_id'] for g in orig_goods]
-        orig_goods_by_spu = {g['spu_id']: g for g in orig_goods}
-        excel_goods_by_spu = {g['spu_id']: g for g in excel_goods}
-
-        merged_goods = []
-        for spu_id in orig_spu_ids:
-            if spu_id in excel_goods_by_spu:
-                merged_goods.append(excel_goods_by_spu[spu_id])
-            else:
-                merged_goods.append(orig_goods_by_spu[spu_id])
-
-        for spu_id, item in excel_goods_by_spu.items():
-            if spu_id not in orig_goods_by_spu:
-                merged_goods.append(item)
-
-        merged_goods.sort(key=lambda x: -x.get('daily', 0))
-
-        items = merged_goods
+        # SPU goods: use excel goods directly (all SPUs from 商品诊断明细)
+        items = sorted(excel_goods, key=lambda x: -x.get('daily', 0))
         current_bm_count = sum(1 for it in items if it.get('is_bm'))
 
-        base_has_bm = excel_cat.get('base_has_bm', orig_cat_data.get('base_has_bm', 0))
-        is_quality = bool(excel_cat.get('is_quality', orig_cat_data.get('is_quality', 0)))
-
-        if base_has_bm:
-            is_dabiao = current_bm_count >= 2
-        else:
-            is_dabiao = current_bm_count >= 1
+        base_has_bm = excel_cat.get('base_has_bm', 0)
+        # is_quality / is_dabiao / is_houdu: trust Excel品类诊断明细 directly
+        is_quality = bool(excel_cat.get('is_quality', 0))
+        is_houdu   = bool(excel_cat.get('has_houdu', 0))
+        # is_dabiao = is_有标杆 in Excel (column '是否有标杆')
+        is_dabiao  = bool(excel_cat.get('has_bm', 0))
 
         if not items:
             dabiao_detail = "无数据"
         elif base_has_bm:
             dabiao_detail = f"基期有标杆,达标SPU数={current_bm_count}"
         else:
-            if current_bm_count >= 1:
+            if is_dabiao:
                 dabiao_detail = "基期无标杆,当前有标杆"
             else:
                 dabiao_detail = "基期无标杆,当前无标杆"
@@ -415,9 +418,6 @@ def update_hive_data(orig_hive, cat_excel_for_hive, goods_for_hive):
         head_thresh_sum = r2(sum(it.get('threshold', 0) for it in head_items))
         pinxiao_multiple = r4(head_daily_sum / head_thresh_sum) if head_thresh_sum > 0 else 0
 
-        # 厕度达标：品类内至少3个不同商家有在售标杆SPU
-        is_houdu = bool(excel_cat.get('has_houdu', orig_cat_data.get('has_houdu', 0)))
-
         new_cat_status[cat_name] = {
             'is_dabiao': is_dabiao,
             'is_quality': is_quality,
@@ -428,13 +428,13 @@ def update_hive_data(orig_hive, cat_excel_for_hive, goods_for_hive):
             'head_daily_sum': head_daily_sum,
             'head_thresh_sum': head_thresh_sum,
             'pinxiao_multiple': pinxiao_multiple,
-            'goods_detail': merged_goods,
+            'goods_detail': items,
         }
 
     return {
         'id': orig_hive['id'],
-        'cats': orig_cats,
-        'cat_count': orig_cat_count,
+        'cats': excel_cats,
+        'cat_count': len(excel_cats),
         'bd': orig_hive.get('bd', ''),
         'group': orig_hive.get('group', ''),
         'cat_status': new_cat_status,
@@ -645,7 +645,11 @@ for _, row in df_goods.iterrows():
     threshold = safe_float(row.get('标杆单产阈值'))
     is_bm = 1 if (daily >= threshold and threshold > 0) else 0
 
-    hid = safe_str(row.get('蜂窝ID'))
+    hid_raw = row.get('蜂窝ID')
+    try:
+        hid = str(int(float(hid_raw))) if hid_raw is not None else ''
+    except (ValueError, TypeError):
+        hid = safe_str(hid_raw)
     hive_name = safe_str(row.get('蜂窝名称'))
     bd = safe_str(row.get('BD姓名'))
     group = safe_str(row.get('联络点'))
