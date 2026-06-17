@@ -455,6 +455,62 @@ D_with_meta['meta'] = META
 print(f"  D蜂窝数: {len(D)}")
 
 # ============================================================
+# 5.5 Build base maturity from 成熟度看板（区域同频） sheet
+# ============================================================
+print("Building base maturity from 成熟度看板表...")
+df_board = pd.read_excel(xls, '成熟度看板（区域同频）', header=None)
+# col3=蜂窝名称, col18=当期成熟度, col30=基期成熟度
+base_maturity_by_name = {}   # hive_name -> base_maturity (float)
+current_maturity_by_name = {}  # hive_name -> current_maturity (float from board)
+for i in range(11, len(df_board)):
+    row = df_board.iloc[i]
+    hive = safe_str(row.iloc[3] if len(row) > 3 else '')
+    if not hive or hive in ('', '负责人', 'nan'):
+        continue
+    mat  = safe_float(row.iloc[18] if len(row) > 18 else 0)
+    base = safe_float(row.iloc[30] if len(row) > 30 else 0)
+    if mat > 0 or base > 0:
+        current_maturity_by_name[hive] = r4(mat)
+        base_maturity_by_name[hive]    = r4(base)
+print(f"  成熟度看板蜂窝数: {len(base_maturity_by_name)}")
+
+# P6 档位得分表（来自挂位规则 Excel + PDF）
+# pp升降对应的折算系数表 (pp_lower_bound, score)
+P6_SCORE_TABLE = [
+    (12,           1.80),
+    (10,           1.60),
+    (8,            1.40),
+    (6,            1.30),
+    (5,            1.25),
+    (4,            1.22),
+    (3.5,          1.20),
+    (3,            1.15),
+    (2.7,          1.12),
+    (2.5,          1.10),
+    (2.3,          1.05),
+    (2,            1.03),
+    (1.5,          1.02),
+    (1,            1.00),
+    (0.5,          0.95),
+    (0,            0.92),
+    (-1,           0.90),
+    (-2,           0.88),
+    (-3,           0.80),
+    (-5,           0.77),
+    (-7,           0.70),
+    (-9,           0.65),
+    (-12,          0.55),
+    (float('-inf'),0.50),
+]
+
+def lookup_p6_score(pp_change):
+    """查P6档位表，pp_change单位是percentage point (e.g. +2.78)"""
+    for lower, score in P6_SCORE_TABLE:
+        if pp_change >= lower:
+            return score
+    return 0.50
+
+# ============================================================
 # 6. Calculate scores
 # ============================================================
 print("Calculating scores...")
@@ -514,8 +570,17 @@ for hive_name, hive_data in D.items():
         elif is_quality:
             quality_only += 1
     fs, dr, coeff, dab = calc_score(hive_data)
+
+    # P6档位得分：基于成熟度pp提升对应查表
+    base_mat = base_maturity_by_name.get(hive_name, 0.0)
+    pp_change = r2((fs - base_mat) * 100)  # pp单位
+    p6_score  = lookup_p6_score(pp_change)
+
     # Write score fields back into the hive object so the JS can read them
     hive_data['finalScore']  = fs
+    hive_data['baseMat']     = base_mat
+    hive_data['ppChange']    = pp_change
+    hive_data['p6Score']     = p6_score
     hive_data['dabiaoRate']  = dr
     hive_data['qualityOnly'] = quality_only
     hive_data['dabiaoOnly']  = dabiao_only
@@ -526,6 +591,9 @@ for hive_name, hive_data in D.items():
         'bd': hive_data['bd'],
         'group': hive_data['group'],
         'finalScore': fs,
+        'baseMat':    base_mat,
+        'ppChange':   pp_change,
+        'p6Score':    p6_score,
         'dabiaoRate': dr,
         'pinxiaoCoeff': coeff,
         'dabiao': dab,
