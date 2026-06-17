@@ -629,8 +629,9 @@ let boardInited=false;
 function initBoardIfNeeded(){
   if(!boardInited){
     boardInited=true;
-    renderBoardTrendCard();
     renderBoardFiltered();
+    // canvas 需要等 DOM 渲染完毕再画
+    setTimeout(renderBoardTrendCard, 50);
   }
 }
 
