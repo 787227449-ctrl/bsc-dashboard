@@ -415,9 +415,13 @@ def update_hive_data(orig_hive, cat_excel_for_hive, goods_for_hive):
         head_thresh_sum = r2(sum(it.get('threshold', 0) for it in head_items))
         pinxiao_multiple = r4(head_daily_sum / head_thresh_sum) if head_thresh_sum > 0 else 0
 
+        # 厕度达标：品类内至少3个不同商家有在售标杆SPU
+        is_houdu = bool(excel_cat.get('has_houdu', orig_cat_data.get('has_houdu', 0)))
+
         new_cat_status[cat_name] = {
             'is_dabiao': is_dabiao,
             'is_quality': is_quality,
+            'is_houdu': is_houdu,
             'base_has_bm': base_has_bm,
             'current_bm_count': current_bm_count,
             'dabiao_detail': dabiao_detail,
@@ -456,49 +460,40 @@ print(f"  D蜂窝数: {len(D)}")
 print("Calculating scores...")
 
 def calc_score(hive_data):
-    """Calculate finalScore for a hive."""
+    """按官方公式计算蜂窝成熟度。
+    蜂窝成熟度 = (质量达标数×1/10 + 标杆达标数×1/2 + 厕度达标数×1) / 核心品类总数
+    同一品类只计最高阶段，不重复计入。
+    """
     cats = hive_data.get('cat_status', {})
     cat_count = len(cats)
     if cat_count == 0:
         return 0.0, 0.0, 1.0, 0
 
-    dabiao_count = sum(1 for c in cats.values() if c.get('is_dabiao'))
-    quality_count = sum(1 for c in cats.values() if c.get('is_quality'))
+    quality_only = 0  # 达质量但未达标杆且未达厕度
+    dabiao_only = 0   # 达标杆但未达厕度
+    houdu_count = 0   # 达厕度（最高阶）
 
-    if dabiao_count == 0:
-        score = r4(quality_count / max(cat_count, 1) * 0.2)
-        return score, 0.0, 1.0, dabiao_count
+    for c in cats.values():
+        is_houdu  = bool(c.get('is_houdu') or c.get('has_houdu'))
+        is_dabiao = bool(c.get('is_dabiao'))
+        is_quality= bool(c.get('is_quality'))
+        if is_houdu:
+            houdu_count += 1
+        elif is_dabiao:
+            dabiao_only += 1
+        elif is_quality:
+            quality_only += 1
 
-    dabiao_rate = min(dabiao_count / 3, 4/3)
+    dabiao_count = dabiao_only + houdu_count  # 标杆达标数（包含厕度阶）
+    total_quality = quality_only + dabiao_count  # 质量达标数（包含标杆和厕度）
 
-    dabiao_cats = [c for c in cats.values() if c.get('is_dabiao')]
-    pinxiao_list = [(c['head_daily_sum'], c['head_thresh_sum']) for c in dabiao_cats]
+    score = r4((total_quality * (1/10) + dabiao_count * (1/2 - 1/10) + houdu_count * (1 - 1/2)) / max(cat_count, 1))
+    # 化简： = (quality*0.1 + dabiao額外+0.4 + houdu額外+0.5) / cat_count
+    # 等价于：(quality_only*0.1 + dabiao_only*0.5 + houdu_count*1.0) / cat_count
+    score = r4((quality_only * 0.1 + dabiao_only * 0.5 + houdu_count * 1.0) / max(cat_count, 1))
 
-    if dabiao_count > 3:
-        pinxiao_list.sort(key=lambda x: x[0] / max(x[1], 0.001), reverse=True)
-        pinxiao_list = pinxiao_list[:4]
-
-    total_daily = sum(p[0] for p in pinxiao_list)
-    total_thresh = sum(p[1] for p in pinxiao_list)
-
-    if total_thresh > 0:
-        pinxiao_multiple = total_daily / total_thresh
-    else:
-        pinxiao_multiple = 1.0
-
-    if pinxiao_multiple >= 2.0:
-        coeff = 1.8
-    elif pinxiao_multiple >= 1.5:
-        coeff = 1.5
-    elif pinxiao_multiple >= 1.2:
-        coeff = 1.3
-    elif pinxiao_multiple >= 1.0:
-        coeff = 1.0
-    else:
-        coeff = 1.0
-
-    final_score = r4(dabiao_rate * coeff)
-    return final_score, r4(dabiao_rate), coeff, dabiao_count
+    dabiao_rate = r4(dabiao_count / max(cat_count, 1))
+    return score, dabiao_rate, 1.0, dabiao_count
 
 
 today_scores = {}
@@ -723,17 +718,20 @@ match_hist_ph = ph_pattern_hist.search(html)
 new_entry = json.dumps(history_entry, ensure_ascii=False)
 if match_hist_ph:
     existing_raw = match_hist_ph.group(1).strip()
-    # existing_raw is a JSON array content (without [ and ])
+    # Parse existing history and deduplicate by date
     if existing_raw == '[]' or existing_raw == '':
-        existing_raw = ''
+        existing_list = []
     else:
-        # strip outer brackets if present
-        if existing_raw.startswith('[') and existing_raw.endswith(']'):
-            existing_raw = existing_raw[1:-1]
-        existing_raw = existing_raw.rstrip().rstrip(',')
-    new_array = '[' + (existing_raw + ',' if existing_raw else '') + new_entry + ']'
+        try:
+            existing_list = json.loads(existing_raw)
+        except Exception:
+            existing_list = []
+    # Remove any existing entry with same date, then append new one
+    existing_list = [e for e in existing_list if e.get('date') != history_entry['date']]
+    existing_list.append(history_entry)
+    new_array = json.dumps(existing_list, ensure_ascii=False)
     html = html[:match_hist_ph.start()] + hist_ph_start + new_array + hist_ph_end + html[match_hist_ph.end():]
-    print("  ✓ HISTORY appended (placeholder)")
+    print("  ✓ HISTORY updated with dedup (placeholder)")
 else:
     # Fallback: old regex
     pattern_hist = re.compile(r'(const HISTORY\s*=\s*\[)(.*?)(\];)', re.DOTALL)
